@@ -1,0 +1,147 @@
+<?xml version="1.0"?>
+<!DOCTYPE suppressions PUBLIC
+    "-//Checkstyle//DTD SuppressionFilter Configuration 1.2//EN"
+    "https://checkstyle.org/dtds/suppressions_1_2.dtd">
+
+<!--
+  Suppressions for pre-existing Checkstyle violations detected during the
+  initial static-analysis integration pass (2237 violations, 32 files).
+
+  These suppressions establish a clean build baseline so the fail-mode flip
+  in hugmesh-parent can be enabled without blocking CI.  Each suppressed
+  check represents a category of tech debt that will be addressed
+  incrementally in follow-up PRs rather than in a single large-diff sweep.
+
+  DO NOT add new suppressions without a corresponding tracking issue.
+  The goal is to remove all suppressions as the codebase is cleaned up.
+
+  TODO: this repo's own pom.xml has no checkstyle-maven-plugin (or PMD/SpotBugs
+  plugin) declaration and deliberately does NOT use the hugmesh-parent POM
+  (see the pom.xml dependency comment), so it's unclear this file is actually
+  consumed by anything today — the "hugmesh-parent fail-mode flip" it
+  references may run checkstyle centrally by convention rather than through
+  this repo's own build. Verify wiring (or lack of it) before assuming this
+  file does anything here.
+-->
+<suppressions>
+
+  <!--
+    LineLength (1238 violations): lines longer than 80 characters.
+    Reformatting every long line would create an enormous, hard-to-review diff
+    and risk introducing subtle logic errors in string literals and expressions.
+    Will be addressed file-by-file during normal maintenance.
+  -->
+  <suppress checks="LineLengthCheck" files=".*\.java"/>
+
+  <!--
+    FinalParameters (267 violations): method/constructor parameters should be
+    declared final.  Mechanical but high-volume — adding final to 267 parameters
+    across 32 files is best done in a dedicated sweep (low-risk, low-urgency).
+  -->
+  <suppress checks="FinalParametersCheck" files=".*\.java"/>
+
+  <!--
+    JavadocMethod (205 violations): missing or malformed @param/@return/@throws
+    tags.  Requires human judgment about each method's contract; not mechanical.
+  -->
+  <suppress checks="JavadocMethodCheck" files=".*\.java"/>
+
+  <!--
+    NeedBraces (132 violations): single-statement bodies without braces.
+    Technically mechanical, but touching control-flow lines in a bulk pass
+    risks losing context on intentional one-liners (e.g. guard returns).
+    Deferred to dedicated cleanup pass.
+  -->
+  <suppress checks="NeedBracesCheck" files=".*\.java"/>
+
+  <!--
+    JavadocVariable (67 violations): missing Javadoc on fields.
+    Non-mechanical; requires per-field documentation decisions.
+  -->
+  <suppress checks="JavadocVariableCheck" files=".*\.java"/>
+
+  <!--
+    HiddenField (59 violations): constructor/setter parameters shadow fields.
+    Renaming parameters changes the public method signature or requires
+    callers to change; deferred.
+  -->
+  <suppress checks="HiddenFieldCheck" files=".*\.java"/>
+
+  <!--
+    DesignForExtension (56 violations): non-abstract, non-final public methods
+    in non-final classes should be abstract or final.  Making Spring beans
+    final conflicts with CGLIB proxying; requires architectural review.
+  -->
+  <suppress checks="DesignForExtensionCheck" files=".*\.java"/>
+
+  <!--
+    MissingJavadocMethod (49 violations): public methods without any Javadoc.
+    Non-mechanical; deferred to documentation pass.
+  -->
+  <suppress checks="MissingJavadocMethodCheck" files=".*\.java"/>
+
+  <!--
+    OperatorWrap (48 violations): binary operators at end-of-line instead of
+    start-of-line (or vice-versa).  Mechanical but touches 48 lines across
+    multiple files; deferred to a formatting-only pass.
+  -->
+  <suppress checks="OperatorWrapCheck" files=".*\.java"/>
+
+  <!--
+    JavadocType (35 violations): missing or malformed class-level Javadoc.
+    Non-mechanical; requires per-class documentation decisions.
+  -->
+  <suppress checks="JavadocTypeCheck" files=".*\.java"/>
+
+  <!--
+    MagicNumber (32 violations): numeric literals used directly in code.
+    Extracting constants may require understanding the domain meaning of each
+    number; deferred.
+  -->
+  <suppress checks="MagicNumberCheck" files=".*\.java"/>
+
+  <!--
+    WhitespaceAround (22 violations): missing whitespace around tokens.
+    Mechanical; deferred to formatting pass alongside OperatorWrap.
+  -->
+  <suppress checks="WhitespaceAroundCheck" files=".*\.java"/>
+
+  <!--
+    ConstantName (16 violations): static final fields not matching
+    ALL_CAPS_WITH_UNDERSCORES pattern.  Mechanical rename but may affect
+    public API; deferred to naming cleanup pass.
+  -->
+  <suppress checks="ConstantNameCheck" files=".*\.java"/>
+
+  <!--
+    JavadocPackage (7 violations): missing package-info.java files.
+    Non-mechanical; requires per-package summary writing.
+  -->
+  <suppress checks="JavadocPackageCheck" files=".*\.java"/>
+
+  <!--
+    FileTabCharacter (1 violation): tab character in source file.
+    Suppressed here to avoid a whitespace-only commit in this PR;
+    will be fixed inline when the file is next touched.
+  -->
+  <suppress checks="FileTabCharacterCheck" files=".*\.java"/>
+
+  <!--
+    InvalidJavadocPosition (1 violation): Javadoc comment in wrong position.
+    Fix requires understanding intended placement; deferred.
+  -->
+  <suppress checks="InvalidJavadocPositionCheck" files=".*\.java"/>
+
+  <!--
+    HideUtilityClassConstructor (1 violation): utility class without private
+    constructor.  Requires adding a private no-arg constructor; deferred.
+  -->
+  <suppress checks="HideUtilityClassConstructorCheck" files=".*\.java"/>
+
+  <!--
+    LeftCurly (1 violation): left curly brace not at end of line.
+    Mechanical; deferred to formatting pass.
+  -->
+  <suppress checks="LeftCurlyCheck" files=".*\.java"/>
+
+</suppressions>

@@ -1,0 +1,74 @@
+# HugMesh CI — build + push this service's container image to the in-cluster
+# GitLab container registry. The GitHub repo is pull-mirrored into in-cluster
+# GitLab (mirror_trigger_builds=true), so this runs on push / mirror-sync on the
+# privileged x86 runner (shell executor with docker, matching the generator CI).
+# Images carry NO keys — KEYS material is supplied from the USB at first boot.
+
+# Pull the centralized OWASP pen-test stage (hidden .pentest-* jobs: SCA via
+# OWASP Dependency-Check + authenticated ZAP DAST + probes/nuclei harness) from
+# the generator so there is ONE source of truth across onboarded repos.
+include:
+  - project: 'HugMesh/hugmesh-generator'
+    ref: main
+    file: '/tests/pentest/ci/pentest-stage.gitlab-ci.yml'
+
+# TODO: `security` looks like a dead stage — the inline P2-1 `dependency-check`
+# job that used to run in it was migrated to `pentest:sca` (in the `pentest`
+# stage below) back when the pentest stage was added; no job in this file
+# declares `stage: security` anymore. Kept here defensively since this repo
+# can't confirm offline whether the included generator hidden jobs
+# (`.pentest-sca` / `.pentest-dast-baseline`) still target it — verify against
+# hugmesh-generator's pentest-stage.gitlab-ci.yml before dropping it.
+stages: [test, security, build, pentest]
+
+test:
+  stage: test
+  tags: [hugmesh-x86, privileged]
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_TAG'
+  script:
+    - docker run --rm -v "${CI_PROJECT_DIR}:/workspace:ro" -w /workspace eclipse-temurin:25-jdk-noble ./mvnw verify -B
+  artifacts:
+    when: always
+    reports:
+      junit: target/surefire-reports/TEST-*.xml
+    paths:
+      - target/surefire-reports/
+    expire_in: 7 days
+
+build:image:
+  needs: [test]
+  stage: build
+  tags: [hugmesh-x86, privileged]
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+    - if: '$CI_COMMIT_TAG'
+  script:
+    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+    # Immutable tag = release tag or git SHA; plus a moving branch tag the deploy/
+    # kustomize can track for dev.
+    - export TAG="${CI_COMMIT_TAG:-$CI_COMMIT_SHORT_SHA}"
+    - docker build --pull -t "$CI_REGISTRY_IMAGE:$TAG" -t "$CI_REGISTRY_IMAGE:$CI_COMMIT_REF_SLUG" .
+    - docker push "$CI_REGISTRY_IMAGE:$TAG"
+    - docker push "$CI_REGISTRY_IMAGE:$CI_COMMIT_REF_SLUG"
+
+# OWASP pen-test jobs — migrated from the former inline `dependency-check` job
+# (P2-1) onto the centralized hidden jobs included above, so the FULL harness
+# (Dependency-Check SCA + authenticated ZAP DAST baseline with probes/nuclei)
+# runs from ONE source of truth. allow_failure keeps them non-blocking; rules
+# mirror the repo's existing security-job posture (default branch + MR).
+pentest:sca:
+  extends: .pentest-sca
+  allow_failure: true
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+
+pentest:dast:
+  extends: .pentest-dast-baseline
+  allow_failure: true
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'

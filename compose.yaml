@@ -1,0 +1,110 @@
+# Local dev stack for the gateway. Brings up:
+#   • Cassandra      — backs the revocation list + URL registry.
+#   • Casdoor + pg   — issues the JWTs the gateway validates.
+#   • hugmesh-games-gateway — the gateway itself, identity defaulted
+#     to hugmesh-games-gateway; flip SPRING_APPLICATION_NAME to
+#     hugmesh-id-gateway / hugmesh-systems-gateway to validate
+#     the multi-instance design without rebuilding the image.
+#
+# Composition matches the hugmesh.games BFF stack (same Cassandra
+# image + version + healthcheck shape) so the gateway can sit in
+# front of that stack with no impedance mismatch.
+
+services:
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: casdoor
+      POSTGRES_USER: casdoor
+      POSTGRES_PASSWORD: casdoor
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U casdoor"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # Seed the gateway_route_access SOURCE OF TRUTH on first boot (canonical
+      # rules from the route-access contract). Runs once when the data dir is
+      # empty — same DB the gateway's ROUTE_ACCESS_R2DBC_URL points at below.
+      - ./compose/route-access-seed.sql:/docker-entrypoint-initdb.d/10-route-access.sql:ro
+
+  casdoor:
+    image: casbin/casdoor:latest
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      RUNNING_IN_DOCKER: "true"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8000/api/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    ports:
+      - "127.0.0.1:8000:8000"
+
+  cassandra:
+    image: cassandra:5
+    environment:
+      CASSANDRA_CLUSTER_NAME: HugMeshGatewayCluster
+      CASSANDRA_DC: dc1
+      CASSANDRA_ENDPOINT_SNITCH: GossipingPropertyFileSnitch
+      MAX_HEAP_SIZE: 512M
+      HEAP_NEWSIZE: 128M
+    healthcheck:
+      test: ["CMD-SHELL", "cqlsh -e 'describe keyspaces' || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 60s
+    volumes:
+      - cassandra_data:/var/lib/cassandra
+
+  cassandra-init:
+    image: cassandra:5
+    depends_on:
+      cassandra:
+        condition: service_healthy
+    entrypoint:
+      - sh
+      - -c
+      - |
+        cqlsh cassandra 9042 -e "
+          CREATE KEYSPACE IF NOT EXISTS hugmesh_gateway
+            WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 1};
+        " && echo '✓ hugmesh_gateway keyspace ready'
+    restart: "no"
+
+  hugmesh-games-gateway:
+    image: hugmesh-systems/gateway:dev
+    build:
+      context: .
+    depends_on:
+      casdoor:
+        condition: service_healthy
+      cassandra:
+        condition: service_healthy
+      cassandra-init:
+        condition: service_completed_successfully
+    environment:
+      SPRING_APPLICATION_NAME: hugmesh-games-gateway
+      CASSANDRA_CONTACT_POINTS: cassandra:9042
+      CASSANDRA_KEYSPACE: hugmesh_gateway
+      CASSANDRA_LOCAL_DC: dc1
+      CASDOOR_ISSUER_URI:  http://casdoor:8000
+      CASDOOR_JWKS_URI:    http://casdoor:8000/.well-known/jwks
+      API_DOWNSTREAM_URI:  http://api:8080
+      # gateway_route_access SOURCE OF TRUTH (R2DBC). The gateway loads the rows
+      # for its SPRING_APPLICATION_NAME, mirrors them into Cassandra, and refreshes
+      # every tick. Unset this to run Cassandra-cache-only / baked-in-seed-only.
+      ROUTE_ACCESS_R2DBC_URL: r2dbc:postgresql://casdoor:casdoor@postgres:5432/casdoor
+    ports:
+      - "127.0.0.1:8080:8080"
+    restart: on-failure
+
+volumes:
+  pgdata:
+  cassandra_data:

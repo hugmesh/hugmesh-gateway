@@ -1,0 +1,200 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+	xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+	<modelVersion>4.0.0</modelVersion>
+	<parent>
+		<groupId>org.springframework.boot</groupId>
+		<artifactId>spring-boot-starter-parent</artifactId>
+		<version>4.0.7</version>
+		<relativePath /> <!-- lookup parent from repository -->
+	</parent>
+	<groupId>systems.hugmesh</groupId>
+	<artifactId>gateway</artifactId>
+	<version>0.0.1-SNAPSHOT</version>
+	<name>hugmesh-gateway</name>
+	<description>HugMesh Spring Gateway</description>
+	<url />
+	<licenses>
+		<license />
+	</licenses>
+	<developers>
+		<developer />
+	</developers>
+	<scm>
+		<connection />
+		<developerConnection />
+		<tag />
+		<url />
+	</scm>
+	<properties>
+		<java.version>25</java.version>
+		<spring-cloud.version>2025.1.2</spring-cloud.version>
+	</properties>
+	<dependencies>
+		<!-- hugmesh-commons 2.1.0 (Boot-4 / Security-7, binary-compatible
+		     with this gateway's spring-boot-starter-parent:4.0.7 +
+		     spring-cloud:2025.1.2 stack). A DIRECT dependency with an EXPLICIT
+		     version. The gateway deliberately KEEPS spring-boot-starter-parent
+		     (NOT hugmesh-parent, which is BFF-focused and would drag in
+		     liquibase / testcontainers-postgres / r2dbc-postgres scaffolding the
+		     gateway's Cassandra-based suite does not use). This brings the shared
+		     security/tenancy/web types onto the classpath.
+
+		     De-dup scope: the gateway KEEPS its own security/Roles +
+		     security/DomainRegistry + config/CasdoorAuthorities +
+		     config/TenancyResourceServerConfig. A class-by-class diff against the
+		     commons 2.0.0 forms found the gateway's Roles and DomainRegistry are
+		     SUPERSETS carrying load-bearing methods commons LACKS — Roles
+		     {isGameMaster, usernameOf, namesOf} (used by GatewayRouteAccessFilter
+		     + ResourceAccessFilter) and DomainRegistry {domainForHost(String) +
+		     the 3-arg app.tenancy.hosts constructor} (used by
+		     GatewayRouteAccessFilter's Host-vs-DOMAIN defense-in-depth check). Per
+		     the HARD RULE those superset classes must NOT be silently dropped, so
+		     they stay per-repo; CasdoorAuthorities + TenancyResourceServerConfig
+		     are transitively bound to those gateway-local types and so stay too.
+		     The dependency still pins the Boot-4 / Security-7 binary-compat
+		     milestone and makes the shared types available for future use. -->
+		<dependency>
+			<groupId>systems.hugmesh</groupId>
+			<artifactId>hugmesh-commons</artifactId>
+			<version>2.1.0</version>
+		</dependency>
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-actuator</artifactId>
+		</dependency>
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-webclient</artifactId>
+		</dependency>
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-webflux</artifactId>
+		</dependency>
+		<dependency>
+			<groupId>org.springframework.cloud</groupId>
+			<artifactId>spring-cloud-starter-gateway-server-webflux</artifactId>
+		</dependency>
+		<!-- OAuth2 resource server: validates Casdoor-issued JWTs and
+		     maps the Casdoor `roles` / `permissions` / `isAdmin` claims to
+		     Spring Security authorities. Aligns the gateway with the
+		     hugmesh.games BFF's SecurityConfig (decision 005). -->
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-oauth2-resource-server</artifactId>
+		</dependency>
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-security</artifactId>
+		</dependency>
+		<!-- Cassandra reactive driver — backs the URL-registry + the
+		     revocation list (the same keyspace hugmesh.games uses for
+		     rate-limit events; one keyspace per cluster, multiple tables
+		     per app). For route-access it is the READ-CACHE that every
+		     gateway pod polls; Postgres (below) is the source of truth. -->
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-data-cassandra-reactive</artifactId>
+		</dependency>
+		<!-- R2DBC + Postgres driver — the SOURCE OF TRUTH for
+		     gateway_route_access (the admin-api owns the canonical rows;
+		     schema at cluster/manifests/route-access/schema.sql). The
+		     gateway loads its own gateway's rows from here on startup +
+		     refresh (reactive, non-blocking) keyed on ROUTE_ACCESS_R2DBC_URL,
+		     then write-through-mirrors them into Cassandra so a pod whose
+		     Postgres is briefly unreachable still serves the last-known set
+		     from the cluster cache. -->
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-data-r2dbc</artifactId>
+		</dependency>
+		<dependency>
+			<groupId>org.postgresql</groupId>
+			<artifactId>r2dbc-postgresql</artifactId>
+			<scope>runtime</scope>
+		</dependency>
+		<!-- Spring Cloud Circuit Breaker (Resilience4j) — wraps the
+		     revocation-list refresh + backend-route calls so a slow
+		     downstream doesn't pile up requests. -->
+		<dependency>
+			<groupId>org.springframework.cloud</groupId>
+			<artifactId>spring-cloud-starter-circuitbreaker-reactor-resilience4j</artifactId>
+		</dependency>
+		<dependency>
+			<groupId>org.projectlombok</groupId>
+			<artifactId>lombok</artifactId>
+			<optional>true</optional>
+		</dependency>
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-actuator-test</artifactId>
+			<scope>test</scope>
+		</dependency>
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-webclient-test</artifactId>
+			<scope>test</scope>
+		</dependency>
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-webflux-test</artifactId>
+			<scope>test</scope>
+		</dependency>
+		<dependency>
+			<groupId>org.springframework.security</groupId>
+			<artifactId>spring-security-test</artifactId>
+			<scope>test</scope>
+		</dependency>
+		<dependency>
+			<groupId>io.projectreactor</groupId>
+			<artifactId>reactor-test</artifactId>
+			<scope>test</scope>
+		</dependency>
+	</dependencies>
+	<dependencyManagement>
+		<dependencies>
+			<dependency>
+				<groupId>org.springframework.cloud</groupId>
+				<artifactId>spring-cloud-dependencies</artifactId>
+				<version>${spring-cloud.version}</version>
+				<type>pom</type>
+				<scope>import</scope>
+			</dependency>
+		</dependencies>
+	</dependencyManagement>
+
+	<build>
+		<plugins>
+			<plugin>
+				<groupId>org.apache.maven.plugins</groupId>
+				<artifactId>maven-compiler-plugin</artifactId>
+				<configuration>
+					<annotationProcessorPaths>
+						<path>
+							<groupId>org.projectlombok</groupId>
+							<artifactId>lombok</artifactId>
+						</path>
+					</annotationProcessorPaths>
+				</configuration>
+			</plugin>
+			<plugin>
+				<groupId>org.graalvm.buildtools</groupId>
+				<artifactId>native-maven-plugin</artifactId>
+			</plugin>
+			<plugin>
+				<groupId>org.springframework.boot</groupId>
+				<artifactId>spring-boot-maven-plugin</artifactId>
+				<configuration>
+					<excludes>
+						<exclude>
+							<groupId>org.projectlombok</groupId>
+							<artifactId>lombok</artifactId>
+						</exclude>
+					</excludes>
+				</configuration>
+			</plugin>
+		</plugins>
+	</build>
+
+</project>

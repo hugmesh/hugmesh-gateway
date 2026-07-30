@@ -1,0 +1,238 @@
+# HugMesh Gateway — base configuration.
+#
+# The Docker image bakes this in; per-deployment overrides (instance
+# name, downstream URIs, Cassandra contact points, Casdoor issuer) come
+# from env vars referenced below. Same image runs as:
+#   • hugmesh-pki-gateway      (PKI/identity tier)
+#   • hugmesh-be-gateway       (backend/BFF-API tier)
+#   • hugmesh-fe-gateway       (front-end/UI tier)
+# or per-brand variants (${BRAND}-{pki,be,fe}-gateway),
+# differentiated by SPRING_APPLICATION_NAME.
+
+spring:
+  application:
+    name: ${SPRING_APPLICATION_NAME:hugmesh-be-gateway}
+
+  # Cassandra-reactive driver. Same cluster the hugmesh.games BFF
+  # writes its rate-limit / revocation rows to — different keyspace
+  # so a misconfigured environment doesn't cross-talk.
+  cassandra:
+    contact-points: ${CASSANDRA_CONTACT_POINTS:cassandra:9042}
+    keyspace-name:  ${CASSANDRA_KEYSPACE:hugmesh_gateway}
+    local-datacenter: ${CASSANDRA_LOCAL_DC:dc1}
+    schema-action: CREATE_IF_NOT_EXISTS
+
+  # OAuth2 resource-server points at Casdoor's JWKS endpoint. The
+  # gateway and the BFF share the same Casdoor instance so a token
+  # minted by /api/auth/token validates here too.
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          # UNCHANGED — single-issuer clusters keep working verbatim.
+          issuer-uri: ${CASDOOR_ISSUER_URI:http://casdoor:8000}
+          jwk-set-uri: ${CASDOOR_JWKS_URI:http://casdoor:8000/.well-known/jwks}
+
+  # Boot routes — these seed the URL registry on first run. Apps
+  # register additional routes at runtime via UrlRegistryService;
+  # the gateway picks them up on the next refresh tick.
+  cloud:
+    gateway:
+      # Spring Cloud Gateway 5.0 (Spring Boot 4) moved the route config prefix to
+      # spring.cloud.gateway.server.webflux.* — the legacy spring.cloud.gateway.routes
+      # prefix was REMOVED in SCG 5.0 and binds NOTHING (silent: empty list, no error),
+      # which killed every statically-configured/fallback route after the Boot-4 bump.
+      server:
+        webflux:
+          routes:
+            - id: api-default
+              uri: ${API_DOWNSTREAM_URI:http://api:8080}
+              predicates:
+                - Path=/api/**
+
+# Cache services — Cassandra-backed, all instances poll periodically.
+app:
+  # ── Multi-tenancy (per-brand Casdoor) — OPT-IN, backward-compatible ──────────
+  # When EMPTY (default) the single issuer-uri above is the only trusted issuer
+  # and maps to domain "default" — IDENTICAL to current single-issuer behaviour
+  # (no multi-issuer decoder is instantiated, every token emits DOMAIN_default).
+  # When populated, EACH entry is a trusted per-brand Casdoor; an issuer NOT
+  # listed FAILS CLOSED (401). Only the architecture/superadmin tier lists ALL
+  # brands; ordinary per-brand gateway instances leave these empty (their own
+  # single issuer-uri + per-instance row selection is the isolation).
+  tenancy:
+    # CSV "issuerUri=domain,issuerUri2=domain2" — the issuer->domain registry.
+    issuers: ${APP_TENANCY_ISSUERS:}
+    # OPTIONAL CSV "hostSuffix=domain,..." — defense-in-depth host->domain map for
+    # the gateway's Host-vs-DOMAIN bypass scoping. Empty => the Host check is a
+    # no-op (every host resolves to "default") on single-brand clusters.
+    hosts: ${APP_TENANCY_HOSTS:}
+  # ── D8 MFA floor (gateway) — SHIPS DARK, both flags DEFAULT OFF ──────────────
+  # When DISABLED (the defaults below) the gateway is byte-identical to its pre-D8
+  # behaviour: the MFA_SATISFIED marker is never derived, the gateway_route_access
+  # mfa_required column is inert, and the privileged-floor check never runs.
+  mfa:
+    # Derive the NON-role MFA_SATISFIED authority from the BFF-written, freshness-
+    # validated `mfa_satisfied_at` JWT-Custom claim, AND enforce the per-row
+    # gateway_route_access.mfa_required gate in decide() (fail-closed). Default
+    # false. The marker is NEVER sourced from roles/permissions (reserved-prefix
+    # guard); a forged permissions:["MFA_SATISFIED"] is dropped.
+    enabled: ${APP_MFA_ENABLED:false}
+    # Freshness window in millis: a stamp is fresh iff 0 <= now - ts <= window
+    # (a FUTURE ts is rejected). Default 10 min — independent of the session TTL.
+    freshness-window: ${APP_MFA_FRESHNESS_WINDOW:600000}
+    # HARD privileged MFA floor: a check ABOVE the SUPERADMIN cross-domain bypass
+    # and the ADMIN/GAME-MASTER own-domain bypass, so a privileged principal on an
+    # mfa_required surface must carry a FRESH MFA_SATISFIED or be DENIED (SUPERADMIN
+    # is NOT exempt). SEPARATE sub-flag from `enabled`; default false. Cold-start
+    # (route-access not yet primed) fails closed with a 503 for these principals.
+    enforce-privileged-floor: ${APP_MFA_ENFORCE_PRIVILEGED_FLOOR:false}
+  revocation:
+    enabled: true
+    refresh-interval-ms: 5000   # 5 s — fast enough that a block
+                                # propagates within one tick of any
+                                # node in the cluster.
+  url-registry:
+    enabled: true
+    refresh-interval-ms: 10000  # 10 s — URL registrations are far
+                                # less time-sensitive than block-list
+                                # propagation.
+    seed-defaults:
+      # Idempotently seed the baked-in default route definitions
+      # (UrlRegistryDefaultRoutes — currently /be/** -> be-gateway) on boot,
+      # via INSERT ... IF NOT EXISTS so an admin's later edit is NOT clobbered.
+      # The route-DEFINITION analogue of the gateway_route_access CanonicalSeed.
+      # Disable on a cluster that manages the registry entirely out-of-band.
+      enabled: true
+  # ── BFF session bridge — opaque bff_ token introspection ─────────────────────
+  # When enabled the gateway calls admin-bff's /bff/internal/session/introspect
+  # endpoint to resolve an opaque bff_ session token into a Spring SecurityContext
+  # (UsernamePasswordAuthenticationToken). The internal surface is permitAll() +
+  # InternalTokenWebFilter (mTLS + X-Internal-Token in enforcing mode) — no JWT
+  # required, unlike /bff/me which falls through to anyExchange().authenticated()
+  # and rejects bff_ Bearers at the Spring security layer before the controller is
+  # reached. Live by default (APP_BFF_SESSION_ENABLED defaults to true); set
+  # APP_BFF_SESSION_ENABLED=false in the pod spec to dark-disable the bridge.
+  # See BffSessionConfig / BffSessionAuthFilter.
+  bff-session:
+    enabled: ${APP_BFF_SESSION_ENABLED:true}    # live by default; set APP_BFF_SESSION_ENABLED=false to dark-disable
+    bff-base-url: ${BFF_BASE_URL:http://admin-bff:8080}   # direct in-cluster svc addr
+    timeout-ms: 2000                        # introspection call timeout
+    # Internal-token sent as X-Internal-Token to /bff/internal/session/introspect.
+    # Must match app.internal-token on admin-bff (InternalTokenWebFilter). Blank in dev
+    # (non-enforcing); supply via INTERNAL_TOKEN env var in prod (same secret as bff-exchange).
+    internal-token: ${INTERNAL_TOKEN:}
+    internal-token-header: ${APP_BFF_SESSION_INTERNAL_TOKEN_HEADER:X-Internal-Token}
+    skip-paths:                             # paths that bypass BFF introspection
+      - /api/auth/**
+      - /api/registration/**
+      - /api/login/**
+      - /_remotes/login/**
+      - /_remotes/registration/**
+      - /_remotes/banned/**
+      - /bff/public/announcements/**
+      - /bff/public/appeal-contact
+      - /_matrix/**
+      - /api/v1/**
+      - /api/v2/**
+      - /oauth/**
+      - /.well-known/**
+      - /actuator/**
+  route-access:
+    enabled: true
+    refresh-interval-ms: 5000   # 5 s — per-gateway external-access rules.
+                                # Postgres (below) is the SOURCE OF TRUTH; each
+                                # pod loads the rows for its own
+                                # spring.application.name, mirrors them into the
+                                # Cassandra read-cache, and refreshes every tick.
+    # R2DBC URL of the gateway_route_access SOURCE OF TRUTH (the admin-api's
+    # Postgres). When UNSET the gateway runs Cassandra-cache-only (and, if that
+    # is also empty, on the baked-in canonical seed) — never fail-open. Example:
+    #   r2dbc:postgresql://user:pass@postgres.hugmesh-backend.svc:5432/hugmesh
+    r2dbc-url: ${ROUTE_ACCESS_R2DBC_URL:}
+
+# Management endpoints are sensitive (cluster state, Cassandra
+# reachability, in-flight request counts). SecurityConfig restricts
+# them to ROLE_GAME-MASTER; this base config also caps the EXPOSURE
+# to the essentials so a misconfigured route can't accidentally make
+# heapdump / threaddump public.
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      show-details: when-authorized
+      roles: GAME-MASTER
+
+# Logging — keep gateway filters at INFO normally; flip to DEBUG when
+# triaging a routing or revocation issue.
+logging:
+  level:
+    "[systems.hugmesh.gateway]": INFO
+    "[systems.hugmesh.gateway.cache]": INFO
+    "[systems.hugmesh.gateway.filter]": INFO
+    "[org.springframework.cloud.gateway]": WARN
+
+server:
+  port: ${PORT:8080}
+
+# ── DOWNSTREAM (gateway -> API) mutual TLS — DEFAULT OFF ─────────────────────
+# When the in-cluster backends enforce mTLS (server.ssl.client-auth=need, wired
+# by the hugmesh-generator deployment manifests), the gateway must present a
+# client cert that chains to the cluster CA on the PROXY leg and validate the
+# backend server cert. DownstreamMtlsConfig builds a reactor-netty SslContext
+# from the in-pod-assembled PKCS12 stores and applies it to the HttpClient — but
+# ONLY when this flag is true (the be/fe-gateway ArgoCD apps set
+# HUGMESH_GATEWAY_MTLS_ENABLED=true). Default false keeps local/dev/CI + the
+# unit smoke test proxying plain http:// backends, the stores never opened.
+#
+# UPSTREAM (public) callers are NOT affected: this configures only the gateway's
+# OUTBOUND client. Browsers / Cloudflare reach the gateway WITHOUT a client cert.
+#
+# The store coordinates bind from hugmesh.tls.* — the SAME keys the chart's
+# build-keystore initContainer writes into /stores/application-tls.properties
+# (loaded via SPRING_CONFIG_ADDITIONAL_LOCATION) — so the passwords are never in
+# git or the pod spec. Defaults below match the chart's /stores layout.
+hugmesh:
+  gateway:
+    mtls:
+      enabled: ${HUGMESH_GATEWAY_MTLS_ENABLED:false}
+    # ── SSO opaque-session bridge: bff_ -> custody-JWT exchange — DEFAULT OFF ──
+    # When enabled, BffJwtExchangeWebFilter runs BEFORE Spring Security and swaps an
+    # inbound Authorization: Bearer bff_… (the opaque session the cookie-terminating
+    # admin-bff mints) for the internal Casdoor custody JWT — by asking the admin-bff
+    # over the mTLS + X-Internal-Token back-channel (POST /bff/internal/session/exchange)
+    # — so the gateway's JWT-only resource server sees a real JWT. FAIL-CLOSED: any
+    # exchange failure 401s and the raw bff_ is never forwarded — the request is
+    # short-circuited (chain.filter is never called) so it can't reach the decoder or
+    # downstream. Default
+    # false => the filter bean AND its WebClient (BffJwtExchangeConfig) are ABSENT and
+    # the chain is byte-identical: a bff_ bearer simply 401s at the JWT decoder as an
+    # invalid token, exactly as today. Reuses the existing dark
+    # hugmesh.gateway.mtls.enabled flag to secure the back-channel.
+    bff-exchange:
+      enabled: ${HUGMESH_GATEWAY_BFF_EXCHANGE_ENABLED:false}
+      # Base URI of the admin-bff (the custody-swap target).
+      admin-bff-uri: ${HUGMESH_GATEWAY_BFF_EXCHANGE_ADMIN_BFF_URI:http://admin-bff:8080}
+      # Internal token the admin-bff's InternalTokenWebFilter checks (it fails closed
+      # when configured). BLANK by default (no secret in git) — supplied via ESO/Vault
+      # secretKeyRef (INTERNAL_TOKEN) in the cluster manifests.
+      internal-token: ${INTERNAL_TOKEN:}
+      internal-token-header: ${HUGMESH_GATEWAY_BFF_EXCHANGE_INTERNAL_TOKEN_HEADER:X-Internal-Token}
+      # Positive-swap cache TTL — failed swaps are NEVER cached. THE TTL IS THE
+      # SUSPENSION-BYPASS WINDOW: a cache hit skips admin-bff's exchange suspension gate,
+      # so a session suspended after its swap was cached keeps authorizing until the entry
+      # expires. Default 5s (matched to revocation refresh-interval-ms above), clamped to a
+      # 60s ceiling in code. Set to 0 to DISABLE the cache entirely (every request
+      # re-consults the gate ⇒ ZERO bypass window, at one in-cluster swap per request) —
+      # recommended where revocation is not wired (RevocationGatewayFilter inert).
+      cache-ttl-ms: ${HUGMESH_GATEWAY_BFF_EXCHANGE_CACHE_TTL_MS:5000}
+  tls:
+    key-store: ${HUGMESH_TLS_KEY_STORE:/stores/keystore.p12}
+    key-store-type: ${HUGMESH_TLS_KEY_STORE_TYPE:PKCS12}
+    key-store-password: ${HUGMESH_TLS_KEY_STORE_PASSWORD:}
+    trust-store: ${HUGMESH_TLS_TRUST_STORE:/stores/truststore.p12}
+    trust-store-type: ${HUGMESH_TLS_TRUST_STORE_TYPE:PKCS12}
+    trust-store-password: ${HUGMESH_TLS_TRUST_STORE_PASSWORD:}
