@@ -345,12 +345,29 @@ public class SecurityConfig {
                         .referrerPolicy(rp -> rp.policy(
                                 org.springframework.security.web.server.header
                                         .ReferrerPolicyServerHttpHeadersWriter.ReferrerPolicy.NO_REFERRER))
-                        // Permissions-Policy — deny powerful features by default.
+                        // Permissions-Policy — deny powerful features by default, with
+                        // the THREE exceptions the platform's own features require.
                         // publickey-credentials-get is left unset here and granted only
                         // on the host serving WebAuthn/MFA enrollment.
+                        //
+                        // camera/microphone/autoplay are (self), NOT (). An EMPTY
+                        // allowlist `camera=()` denies EVERY origin INCLUDING self, which
+                        // makes the shipped Matrix video/voice call feature impossible:
+                        // getUserMedia rejects with NotAllowedError ("Permissions policy
+                        // violation: camera is not allowed in this document"), matrix-ui
+                        // never acquires a local stream, never builds an offer and never
+                        // sends m.call.invite — the caller sits in 'calling' while the
+                        // callee stays 'idle' forever. The failure is invisible at the
+                        // network layer (the request is never made at all), which is why
+                        // it reads as a WebRTC/ICE problem rather than a header problem.
+                        // (self) still denies every OTHER origin, so an embedded
+                        // third-party iframe gets nothing. autoplay=(self) is needed on
+                        // the receiving side so the remote <video> can start without a
+                        // user gesture. display-capture stays () — screen sharing is not
+                        // a shipped feature and gets no grant.
                         .permissionsPolicy(pp -> pp.policy(
-                                "geolocation=(), camera=(), microphone=(), payment=(), usb=(), "
-                                + "accelerometer=(), gyroscope=(), magnetometer=(), autoplay=(), "
+                                "geolocation=(), camera=(self), microphone=(self), payment=(), usb=(), "
+                                + "accelerometer=(), gyroscope=(), magnetometer=(), autoplay=(self), "
                                 + "display-capture=(), fullscreen=(self)"))
                         // COOP/CORP — same-origin isolation. COEP: require-corp is
                         // DELIBERATELY NOT enabled (would break module-federation

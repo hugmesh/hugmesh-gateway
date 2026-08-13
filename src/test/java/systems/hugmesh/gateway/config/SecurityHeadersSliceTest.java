@@ -74,8 +74,8 @@ class SecurityHeadersSliceTest extends SecuritySliceSupport {
                         + "object-src 'none'; upgrade-insecure-requests")
                 .expectHeader().valueEquals("Referrer-Policy", "no-referrer")
                 .expectHeader().valueEquals("Permissions-Policy",
-                        "geolocation=(), camera=(), microphone=(), payment=(), usb=(), "
-                        + "accelerometer=(), gyroscope=(), magnetometer=(), autoplay=(), "
+                        "geolocation=(), camera=(self), microphone=(self), payment=(), usb=(), "
+                        + "accelerometer=(), gyroscope=(), magnetometer=(), autoplay=(self), "
                         + "display-capture=(), fullscreen=(self)")
                 .expectHeader().valueEquals("Cross-Origin-Opener-Policy", "same-origin")
                 .expectHeader().valueEquals("Cross-Origin-Resource-Policy", "same-origin")
