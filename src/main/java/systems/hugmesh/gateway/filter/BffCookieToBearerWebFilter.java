@@ -75,48 +75,30 @@ public class BffCookieToBearerWebFilter implements WebFilter, Ordered {
             return chain.filter(exchange);
         }
         String token = cookie.getValue();
-        // Synthesise the bearer AND CONSUME the bff_session cookie from the forwarded request.
-        // Consuming it is load-bearing: with bff-exchange ON, the swap filter ({@link
-        // BffJwtExchangeWebFilter}) turns this bearer into a custody JWT and the resource server
-        // installs a JwtAuthenticationToken. If we LEFT the cookie in place, the sibling
-        // BffSessionAuthFilter would ALSO resolve it (via introspect) into a NON-JWT
-        // UsernamePasswordAuthenticationToken that pre-empts the JWT context — and the downstream
-        // JWT-expecting authorizers (GatewayRouteAccessFilter privileged-floor / ResourceAccessFilter)
-        // would then see no JWT and 401. One carrier, one identity: the custody-JWT path.
-        String strippedCookies = cookieHeaderWithout(exchange, SESSION_COOKIE);
-        log.debug("[bff-cookie-bridge] synthesising bearer + consuming {} cookie for path={}",
-                SESSION_COOKIE, exchange.getRequest().getPath().value());
+        // Synthesise the bearer and KEEP the bff_session cookie on the forwarded request.
+        //
+        // An earlier revision CONSUMED the cookie here ("one carrier, one identity"),
+        // reasoning that the sibling BffSessionAuthFilter would otherwise resolve the
+        // cookie into a second, non-JWT identity. It cannot: with bff-exchange ON the
+        // Authorization header carries the swapped-in custody JWT by the time that
+        // filter runs (bridge +4 -> swap +5 -> session filter +50), and its
+        // extractToken() consults the Authorization header FIRST and skips outright on
+        // a non-bff_ value — the cookie is never consulted. So consumption bought
+        // nothing gateway-side, while DOWNSTREAM it starved every cookie-terminated
+        // BFF surface: user-bff's GET /bff/session (permitAll, cookie-read at the app
+        // layer — the login-ui hydrate path) answered 401 "no session" for every
+        // logged-in browser, so onboarding hung at the register/nav race and the
+        // whole UI e2e family failed. Verified live 2026-08-13: front door
+        // /bff/session 401 with the cookie consumed; user-bff direct with the same
+        // cookie 200. The custody JWT still replaces the bearer for the pure JWT
+        // resource servers (forum/wiki/tube/owncast/forge) — both carriers describe
+        // the SAME session, minted seconds apart from the same introspection.
+        log.debug("[bff-cookie-bridge] synthesising bearer (cookie retained) for path={}",
+                exchange.getRequest().getPath().value());
         ServerWebExchange mutated = exchange.mutate()
-                .request(b -> b.headers(h -> {
-                    h.set(HttpHeaders.AUTHORIZATION, "Bearer " + token);
-                    if (strippedCookies == null) {
-                        h.remove(HttpHeaders.COOKIE);
-                    } else {
-                        h.set(HttpHeaders.COOKIE, strippedCookies);
-                    }
-                }))
+                .request(b -> b.headers(h -> h.set(HttpHeaders.AUTHORIZATION, "Bearer " + token)))
                 .build();
         return chain.filter(mutated);
-    }
-
-    /**
-     * Rebuild the inbound {@code Cookie} header with the named cookie removed (other cookies —
-     * e.g. a CSRF token — are preserved). Returns {@code null} when no cookies remain so the
-     * caller can drop the header entirely.
-     */
-    private static String cookieHeaderWithout(ServerWebExchange exchange, String name) {
-        java.util.List<String> headers = exchange.getRequest().getHeaders().get(HttpHeaders.COOKIE);
-        if (headers == null || headers.isEmpty()) {
-            return null;
-        }
-        String prefix = name + "=";
-        String kept = headers.stream()
-                .flatMap(h -> java.util.Arrays.stream(h.split(";")))
-                .map(String::trim)
-                .filter(pair -> !pair.isEmpty() && !pair.startsWith(prefix))
-                .reduce((a, b) -> a + "; " + b)
-                .orElse(null);
-        return (kept == null || kept.isBlank()) ? null : kept;
     }
 
     @Override
