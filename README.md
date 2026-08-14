@@ -13,7 +13,7 @@ Spring Boot 4.0.7 / Spring Cloud 2025.1.2 on Java 25, reactive throughout (WebFl
 reactive Cassandra + R2DBC Postgres). The gateway tracks the unified platform
 ecosystem baseline and consumes the shared
 [`hugmesh-commons`](https://github.com/hugmesh-net/hugmesh-commons) 2.1.0 artifact
-(`systems.hugmesh.commons.*` security/tenancy) as a **direct, explicitly-versioned
+(`net.hugmesh.commons.*` security/tenancy) as a **direct, explicitly-versioned
 dependency** — it deliberately keeps `spring-boot-starter-parent` rather than the
 BFF-focused [`hugmesh-parent`](https://github.com/hugmesh-net/hugmesh-parent) metapom,
 and does **not** depend on
@@ -445,12 +445,12 @@ forward-looking, not-yet-started work in *Roadmap* below):
   expires (TTL default 5s, hard-clamped to 60s; `cache-ttl-ms<=0` disables the
   cache for a zero-window posture). PR #68 bounded what was previously an
   unclamped (effectively 60s-default) window. Documented in
-  `src/main/java/systems/hugmesh/gateway/filter/BffJwtExchangeWebFilter.java`.
+  `src/main/java/net/hugmesh/gateway/filter/BffJwtExchangeWebFilter.java`.
 - **`BffCookieToBearerWebFilter` has no dedicated unit test** — shipped on `main`
   (PR #66) and covered indirectly by whatever exercises the exchange path end to end,
   but there is no `BffCookieToBearerWebFilterTest` (contrast with
   `BffJwtExchangeWebFilterTest` / `BffSessionAuthFilterTest`, which each have one)
-  (`src/main/java/systems/hugmesh/gateway/filter/BffCookieToBearerWebFilter.java`).
+  (`src/main/java/net/hugmesh/gateway/filter/BffCookieToBearerWebFilter.java`).
 - **`compose.yaml` still names its dev instance after the pre-unification scheme,
   not the current `hugmesh-{pki,be,fe}-gateway` / `${BRAND}-{pki,be,fe}-gateway`
   convention** described above and in `ROADMAP.md`. It wires a service named
@@ -477,7 +477,7 @@ forward-looking, not-yet-started work in *Roadmap* below):
   family as an already-documented, still-open fleet-wide gap on the `server.ssl.*`
   binding used by several BFFs sharing the identical `build-keystore` +
   `application-tls.properties` pattern — flagged here as a TODO
-  (`src/main/java/systems/hugmesh/gateway/config/DownstreamMtlsProperties.java`)
+  (`src/main/java/net/hugmesh/gateway/config/DownstreamMtlsProperties.java`)
   rather than guess-fixed, since the actual fix is chart-side (a different repo)
   and needs a human decision on the mechanism (rename the emitted file, activate a
   `tls` profile, or bridge the property) that a single-repo pass can't make safely.

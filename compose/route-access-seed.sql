@@ -31,13 +31,13 @@ ALTER TABLE gateway_route_access ADD COLUMN IF NOT EXISTS domain text;
 CREATE INDEX IF NOT EXISTS idx_route_access_gw ON gateway_route_access (gateway, url_pattern);
 
 INSERT INTO gateway_route_access (gateway, url_pattern, role, allow) VALUES
-  -- pki-gateway (id.hugmesh.systems -> casdoor)
+  -- pki-gateway (id.hugmesh.net -> casdoor)
   ('hugmesh-pki-gateway',  '/api/auth/**',          'ROLE_USER',  true),
   ('hugmesh-pki-gateway',  '/login/**',             'PUBLIC',     true),
   ('hugmesh-pki-gateway',  '/.well-known/**',       'PUBLIC',     true),
   -- SUPERADMIN floor for the headscale control plane (bug #15). The pki gateway
   -- also fronts the cross-domain headscale control plane on its own Host
-  -- (application-pki.yml: the `headscale` route matches Host=scale.hugmesh.systems
+  -- (application-pki.yml: the `headscale` route matches Host=scale.hugmesh.net
   -- with NO Path predicate, so its paths are NOT covered by the three rows above).
   -- Without a row those paths were NO_RULE and any authenticated same-domain
   -- ROLE_USER reached the superadmin-tier control plane. The /** catch-all is the
@@ -47,7 +47,7 @@ INSERT INTO gateway_route_access (gateway, url_pattern, role, allow) VALUES
   -- control plane. Mirrors the canonical CanonicalSeed.pki() fallback + the
   -- be-gateway `/bff/superadmin/** -> ROLE_SUPERADMIN` precedent.
   ('hugmesh-pki-gateway',  '/**',                   'ROLE_SUPERADMIN', true),
-  -- be-gateway (matrix/mastodon/api.hugmesh.systems)
+  -- be-gateway (matrix/mastodon/api.hugmesh.net)
   -- Homeserver surfaces are gated by the PLATFORM roles (account-states
   -- ban/congruence), NOT the broad ROLE_USER floor: a ban removes ROLE_MATRIX /
   -- ROLE_MASTODON and the longest-pattern allow-predicate goes false here.
@@ -96,7 +96,7 @@ INSERT INTO gateway_route_access (gateway, url_pattern, role, allow) VALUES
   ('hugmesh-be-gateway',   '/bff/superadmin/**',        'ROLE_SUPERADMIN',    true),  -- superadmin infra console (tailnet)
   ('hugmesh-be-gateway',   '/api/**',               'ROLE_USER',     true),
   ('hugmesh-be-gateway',   '/api/admin/**',         'ROLE_ADMIN',    true),
-  -- fe-gateway (hugmesh.systems host + MFE + /bff proxy)
+  -- fe-gateway (hugmesh.net host + MFE + /bff proxy)
   ('hugmesh-fe-gateway',   '/',                     'PUBLIC',        true),
   -- Social SPA shells congruent with the be platform gates.
   ('hugmesh-fe-gateway',   '/social/matrix/**',     'ROLE_MATRIX',   true),

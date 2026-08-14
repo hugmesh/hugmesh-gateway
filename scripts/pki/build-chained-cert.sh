@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 # Build a chained cert hierarchy for a HugMesh stack:
 #
-#   hugmesh.systems Root CA  (input — `--root-ca` / `--root-key`)
+#   hugmesh.net Root CA  (input — `--root-ca` / `--root-key`)
 #      └── <stack-name> Intermediate CA      (generated here)
 #             └── server leaf cert
 #             └── mTLS client leaf cert
@@ -75,7 +75,7 @@ echo "[pki] generating chained certs for stack=$STACK_NAME leaf=$LEAF_CN"
 echo "[pki]   root CA  : $ROOT_CA_ABS"
 echo "[pki]   out dir  : $OUT_DIR"
 
-# ---- 1: intermediate CA signed by the hugmesh.systems root ----
+# ---- 1: intermediate CA signed by the hugmesh.net root ----
 docker run --rm \
   -v "$ROOT_CA_DIR:/root-ca:ro" \
   -v "$OUT_DIR:/out" \

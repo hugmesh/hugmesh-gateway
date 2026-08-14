@@ -10,7 +10,7 @@ link out to.
 ## Pages
 
 - [`decisions/001-cert-chain-hierarchy.md`](decisions/001-cert-chain-hierarchy.md)
-  — ADR: why the platform's PKI is rooted at a single `hugmesh.systems`
+  — ADR: why the platform's PKI is rooted at a single `hugmesh.net`
   root with per-stack/per-brand intermediates, and how
   [`scripts/pki/build-chained-cert.sh`](../scripts/pki/build-chained-cert.sh)
   (which lives in this repo) implements it.

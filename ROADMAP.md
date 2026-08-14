@@ -25,26 +25,26 @@ work" — are merged. Each maps to source in this repo.
 
 | Piece | File |
 |---|---|
-| Casdoor JWT decoder + authorities converter (single source of truth, reserved-prefix `ROLE_`/`DOMAIN_` strip) | [CasdoorAuthorities.java](src/main/java/systems/hugmesh/gateway/config/CasdoorAuthorities.java), [SecurityConfig.java](src/main/java/systems/hugmesh/gateway/config/SecurityConfig.java) |
-| Roles utility (string + object `roles` shapes, issuer-keyed `domainOf`) | [Roles.java](src/main/java/systems/hugmesh/gateway/security/Roles.java) |
-| Cassandra-backed cluster-wide revocation list + write/snapshot API | [RevocationListService.java](src/main/java/systems/hugmesh/gateway/cache/RevocationListService.java), [GatewayRevocationController.java](src/main/java/systems/hugmesh/gateway/controller/GatewayRevocationController.java) |
-| Cassandra-backed URL federation registry | [UrlRegistryService.java](src/main/java/systems/hugmesh/gateway/cache/UrlRegistryService.java) |
-| WebFilter pipeline (revocation 10/11, External-Auth 20, route-access 25, resource-access 30 — see the README's *Request pipeline* table for the current `@Order` values) | [filter/](src/main/java/systems/hugmesh/gateway/filter/) |
-| Per-gateway route access (Postgres source-of-truth + Cassandra read-cache + baked `CanonicalSeed`, longest-pattern-match, fail-closed) | [GatewayRouteAccessFilter.java](src/main/java/systems/hugmesh/gateway/filter/GatewayRouteAccessFilter.java), [CanonicalSeed.java](src/main/java/systems/hugmesh/gateway/cache/CanonicalSeed.java) |
-| Multi-tenancy / domain scoping (issuer→domain `DomainRegistry`, opt-in `TenancyResourceServerConfig`) | [DomainRegistry.java](src/main/java/systems/hugmesh/gateway/security/DomainRegistry.java) |
-| **Cassandra schema migrations** — versioned `schema_migrations`-recorded change-ids replayed on boot (was roadmap item 4) | [CassandraSchemaMigrations.java](src/main/java/systems/hugmesh/gateway/cache/CassandraSchemaMigrations.java), [GatewayCassandraSchemaAutoConfiguration.java](src/main/java/systems/hugmesh/autoconfigure/GatewayCassandraSchemaAutoConfiguration.java) |
-| **Resilience4j circuit breaker** on the route-access control-plane refresh (gateway portion of old item 9) | [GatewayResilienceConfig.java](src/main/java/systems/hugmesh/gateway/config/GatewayResilienceConfig.java) |
-| **Infra/`/actuator/**` gating** on `ROLE_GAME-MASTER`/`ROLE_ADMIN`/`ROLE_SUPERADMIN` (gateway portion of old item 10) | [SecurityConfig.java](src/main/java/systems/hugmesh/gateway/config/SecurityConfig.java) |
-| Cross-tenant revocation BFLA fix (CWE-639) + route-access role-perm bypass fix | [GatewayRevocationController.java](src/main/java/systems/hugmesh/gateway/controller/GatewayRevocationController.java) (PR #30) |
+| Casdoor JWT decoder + authorities converter (single source of truth, reserved-prefix `ROLE_`/`DOMAIN_` strip) | [CasdoorAuthorities.java](src/main/java/net/hugmesh/gateway/config/CasdoorAuthorities.java), [SecurityConfig.java](src/main/java/net/hugmesh/gateway/config/SecurityConfig.java) |
+| Roles utility (string + object `roles` shapes, issuer-keyed `domainOf`) | [Roles.java](src/main/java/net/hugmesh/gateway/security/Roles.java) |
+| Cassandra-backed cluster-wide revocation list + write/snapshot API | [RevocationListService.java](src/main/java/net/hugmesh/gateway/cache/RevocationListService.java), [GatewayRevocationController.java](src/main/java/net/hugmesh/gateway/controller/GatewayRevocationController.java) |
+| Cassandra-backed URL federation registry | [UrlRegistryService.java](src/main/java/net/hugmesh/gateway/cache/UrlRegistryService.java) |
+| WebFilter pipeline (revocation 10/11, External-Auth 20, route-access 25, resource-access 30 — see the README's *Request pipeline* table for the current `@Order` values) | [filter/](src/main/java/net/hugmesh/gateway/filter/) |
+| Per-gateway route access (Postgres source-of-truth + Cassandra read-cache + baked `CanonicalSeed`, longest-pattern-match, fail-closed) | [GatewayRouteAccessFilter.java](src/main/java/net/hugmesh/gateway/filter/GatewayRouteAccessFilter.java), [CanonicalSeed.java](src/main/java/net/hugmesh/gateway/cache/CanonicalSeed.java) |
+| Multi-tenancy / domain scoping (issuer→domain `DomainRegistry`, opt-in `TenancyResourceServerConfig`) | [DomainRegistry.java](src/main/java/net/hugmesh/gateway/security/DomainRegistry.java) |
+| **Cassandra schema migrations** — versioned `schema_migrations`-recorded change-ids replayed on boot (was roadmap item 4) | [CassandraSchemaMigrations.java](src/main/java/net/hugmesh/gateway/cache/CassandraSchemaMigrations.java), [GatewayCassandraSchemaAutoConfiguration.java](src/main/java/net/hugmesh/autoconfigure/GatewayCassandraSchemaAutoConfiguration.java) |
+| **Resilience4j circuit breaker** on the route-access control-plane refresh (gateway portion of old item 9) | [GatewayResilienceConfig.java](src/main/java/net/hugmesh/gateway/config/GatewayResilienceConfig.java) |
+| **Infra/`/actuator/**` gating** on `ROLE_GAME-MASTER`/`ROLE_ADMIN`/`ROLE_SUPERADMIN` (gateway portion of old item 10) | [SecurityConfig.java](src/main/java/net/hugmesh/gateway/config/SecurityConfig.java) |
+| Cross-tenant revocation BFLA fix (CWE-639) + route-access role-perm bypass fix | [GatewayRevocationController.java](src/main/java/net/hugmesh/gateway/controller/GatewayRevocationController.java) (PR #30) |
 | **SCG-5 route-namespace fix** — route prefix renamed to `spring.cloud.gateway.server.webflux.routes` (Boot-4 / SCG-5 renamed it; stale `spring.cloud.gateway.routes` bound zero routes) + a route-binding IT | [application.yml](src/main/resources/application.yml) |
-| **`bff_`→custody-JWT exchange bridge** (pre-security swap, mTLS back-channel, fail-closed; **ships dark** `hugmesh.gateway.bff-exchange.enabled`) (PR #48) | [BffJwtExchangeWebFilter.java](src/main/java/systems/hugmesh/gateway/filter/BffJwtExchangeWebFilter.java) |
-| **`bff_`/cookie introspection bridge** (`GET /bff/internal/session/introspect` → SecurityContext, fail-closed; **live by default** `app.bff-session.enabled` since PR #70, was dark at #51/#55/#57) (PR #51, #55, #57, #70) | [BffSessionAuthFilter.java](src/main/java/systems/hugmesh/gateway/filter/BffSessionAuthFilter.java) |
-| **D6/D8 MFA gateway floor** — `mfa_required` column on `gateway_route_access`, `MFA_SATISFIED` authority in `CasdoorAuthorities`, privileged-route MFA floor in `GatewayRouteAccessFilter`; all three **ship dark** (`app.mfa.enabled` / `app.mfa.enforce-privileged-floor`, default off) (PR #40) | [CasdoorAuthorities.java](src/main/java/systems/hugmesh/gateway/config/CasdoorAuthorities.java), [GatewayRouteAccessFilter.java](src/main/java/systems/hugmesh/gateway/filter/GatewayRouteAccessFilter.java) |
-| **CSRF-disabled-by-design guard test** — asserts the bearer gateway keeps `csrf.disable()` (correct by construction; defends against a scanner "fix" that would 403 every bearer POST) (PR #49) | [CsrfDocGuardTest.java](src/test/java/systems/hugmesh/gateway/config/CsrfDocGuardTest.java) |
+| **`bff_`→custody-JWT exchange bridge** (pre-security swap, mTLS back-channel, fail-closed; **ships dark** `hugmesh.gateway.bff-exchange.enabled`) (PR #48) | [BffJwtExchangeWebFilter.java](src/main/java/net/hugmesh/gateway/filter/BffJwtExchangeWebFilter.java) |
+| **`bff_`/cookie introspection bridge** (`GET /bff/internal/session/introspect` → SecurityContext, fail-closed; **live by default** `app.bff-session.enabled` since PR #70, was dark at #51/#55/#57) (PR #51, #55, #57, #70) | [BffSessionAuthFilter.java](src/main/java/net/hugmesh/gateway/filter/BffSessionAuthFilter.java) |
+| **D6/D8 MFA gateway floor** — `mfa_required` column on `gateway_route_access`, `MFA_SATISFIED` authority in `CasdoorAuthorities`, privileged-route MFA floor in `GatewayRouteAccessFilter`; all three **ship dark** (`app.mfa.enabled` / `app.mfa.enforce-privileged-floor`, default off) (PR #40) | [CasdoorAuthorities.java](src/main/java/net/hugmesh/gateway/config/CasdoorAuthorities.java), [GatewayRouteAccessFilter.java](src/main/java/net/hugmesh/gateway/filter/GatewayRouteAccessFilter.java) |
+| **CSRF-disabled-by-design guard test** — asserts the bearer gateway keeps `csrf.disable()` (correct by construction; defends against a scanner "fix" that would 403 every bearer POST) (PR #49) | [CsrfDocGuardTest.java](src/test/java/net/hugmesh/gateway/config/CsrfDocGuardTest.java) |
 | OWASP pen-test CI leg (`test → security → build → pentest`, centralized SCA + ZAP DAST via `hugmesh-generator` include) | [.gitlab-ci.yml](.gitlab-ci.yml) (PR #29, #31) |
 | Multi-instance Dockerfile + compose | [Dockerfile](Dockerfile), [compose.yaml](compose.yaml) |
 | Spring Cloud Circuit Breaker dependency | [pom.xml](pom.xml) |
-| Unit + context tests | [src/test/](src/test/java/systems/hugmesh/gateway/) |
+| Unit + context tests | [src/test/](src/test/java/net/hugmesh/gateway/) |
 
 ---
 
@@ -134,7 +134,7 @@ cross-repo items list the target repo(s).
 ### 9. Block + revocation cascade on the BFFs 🔭 (gateway portion ✅ shipped)
 
 - **Gateway**: the Resilience4j circuit breaker on the route-access refresh is
-  **✅ shipped** ([GatewayResilienceConfig.java](src/main/java/systems/hugmesh/gateway/config/GatewayResilienceConfig.java)).
+  **✅ shipped** ([GatewayResilienceConfig.java](src/main/java/net/hugmesh/gateway/config/GatewayResilienceConfig.java)).
 - **Repo (remaining)**: the per-role BFFs (`hugmesh-*-bff-api`).
 - **Work**: the BFFs should also consult the same Cassandra revocation table at
   the controller layer for outgoing calls, wrapping downstream calls with
@@ -146,7 +146,7 @@ cross-repo items list the target repo(s).
 
 - **Gateway**: `/actuator/**` + `/api/admin/{health,cassandra,cluster}/**` are
   **✅ shipped** gated on `ROLE_GAME-MASTER`/`ROLE_ADMIN`/`ROLE_SUPERADMIN` in
-  [SecurityConfig.java](src/main/java/systems/hugmesh/gateway/config/SecurityConfig.java).
+  [SecurityConfig.java](src/main/java/net/hugmesh/gateway/config/SecurityConfig.java).
 - **Where (remaining)**: every other Spring service (BFFs + builders).
 - **Work**: audit every infra-touching `@RequestMapping` and apply consistent
   `@PreAuthorize`; add a test that asserts every `/actuator/*` returns 403 for
@@ -264,7 +264,7 @@ live, cluster-verified SSO e2e.
 
 | Piece | Target repo | Status |
 |---|---|---|
-| Shared stateful auth stack — `AccountStore`/`BffSession`, `OidcExchangeClient`, `BffCustodyCipher` (AES-256-GCM), `SessionCookieService` (opaque `bff_`), `InternalTokenWebFilter` (mTLS + `X-Internal-Token` guard for `/bff/internal/**`) | `hugmesh-auth-core` (jar `systems.hugmesh:hugmesh-auth-core` **2.3.0** — landed at 2.1.0; `main` is 2.3.0, on parent 2.7.0) — consumed by admin-bff + user-bff only, NOT the gateway (keeps r2dbc/casdoor off the gateway classpath) | ✅ shipped |
+| Shared stateful auth stack — `AccountStore`/`BffSession`, `OidcExchangeClient`, `BffCustodyCipher` (AES-256-GCM), `SessionCookieService` (opaque `bff_`), `InternalTokenWebFilter` (mTLS + `X-Internal-Token` guard for `/bff/internal/**`) | `hugmesh-auth-core` (jar `net.hugmesh:hugmesh-auth-core` **2.3.0** — landed at 2.1.0; `main` is 2.3.0, on parent 2.7.0) — consumed by admin-bff + user-bff only, NOT the gateway (keeps r2dbc/casdoor off the gateway classpath) | ✅ shipped |
 | admin-bff **adopted auth-core** (behavior-preserving, 1517 tests green) | `hugmesh-admin-bff-api` (PR #111) | ✅ shipped |
 | admin-bff **`/bff/internal` account/session API** — ensure/get/complete/allowlist/sessions/namespaces, guarded by `InternalTokenWebFilter`, ships inert | `hugmesh-admin-bff-api` (PR #113) | ✅ shipped |
 | auth-core custody minor — `BffSession` JWT-custody columns (`access_token_enc` / `refresh_token_enc` / `access_token_expires_at` / `custody_updated_at`) + `stampCustody` / `clearCustody` / `sessionRow` (additive minor; 2.0.0 stays immutable). Landed at **2.1.0**; auth-core `main` is at **2.3.0** | `hugmesh-auth-core` | ✅ shipped |

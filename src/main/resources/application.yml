@@ -170,9 +170,9 @@ management:
 # triaging a routing or revocation issue.
 logging:
   level:
-    "[systems.hugmesh.gateway]": INFO
-    "[systems.hugmesh.gateway.cache]": INFO
-    "[systems.hugmesh.gateway.filter]": INFO
+    "[net.hugmesh.gateway]": INFO
+    "[net.hugmesh.gateway.cache]": INFO
+    "[net.hugmesh.gateway.filter]": INFO
     "[org.springframework.cloud.gateway]": WARN
 
 server:
