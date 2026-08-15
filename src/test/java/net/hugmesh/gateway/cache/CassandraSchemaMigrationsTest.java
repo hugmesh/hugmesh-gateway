@@ -81,7 +81,7 @@ class CassandraSchemaMigrationsTest {
 
         assertThat(migrations).containsKey("007-gateway-route-access-domain-column");
         String cql = migrations.get("007-gateway-route-access-domain-column");
-        assertThat(cql).contains("ALTER TABLE gateway_route_access ADD domain text");
+        assertThat(cql).contains("ALTER TABLE gateway_route_access ADD IF NOT EXISTS domain text");
         // The 005 CREATE TABLE entry is unchanged (no domain column smuggled in).
         assertThat(migrations.get("005-gateway-route-access-table"))
                 .doesNotContain("domain");
@@ -101,7 +101,7 @@ class CassandraSchemaMigrationsTest {
 
         assertThat(migrations).containsKey("008-url-registry-strip-prefix-column");
         String cql = migrations.get("008-url-registry-strip-prefix-column");
-        assertThat(cql).contains("ALTER TABLE url_registry ADD strip_prefix int");
+        assertThat(cql).contains("ALTER TABLE url_registry ADD IF NOT EXISTS strip_prefix int");
         // The 003 CREATE TABLE entry is unchanged (no strip_prefix column smuggled in).
         assertThat(migrations.get("003-url-registry-table"))
                 .doesNotContain("strip_prefix");
@@ -122,7 +122,7 @@ class CassandraSchemaMigrationsTest {
 
         assertThat(migrations).containsKey("009-revocations-domain-column");
         String cql = migrations.get("009-revocations-domain-column");
-        assertThat(cql).contains("ALTER TABLE revocations ADD domain text");
+        assertThat(cql).contains("ALTER TABLE revocations ADD IF NOT EXISTS domain text");
         // The 002 CREATE TABLE entry is unchanged (no domain column smuggled in).
         assertThat(migrations.get("002-revocations-table"))
                 .doesNotContain("domain");
@@ -142,7 +142,7 @@ class CassandraSchemaMigrationsTest {
 
         assertThat(migrations).containsKey("010-gateway-route-access-mfa-required-column");
         String cql = migrations.get("010-gateway-route-access-mfa-required-column");
-        assertThat(cql).contains("ALTER TABLE gateway_route_access ADD mfa_required boolean");
+        assertThat(cql).contains("ALTER TABLE gateway_route_access ADD IF NOT EXISTS mfa_required boolean");
         // 010 is the LAST (newest) change-id — never inserted before a shipped one.
         assertThat(migrations.keySet()).last().isEqualTo("010-gateway-route-access-mfa-required-column");
         // The 005 CREATE TABLE entry is unchanged (no mfa_required smuggled in).
@@ -170,5 +170,67 @@ class CassandraSchemaMigrationsTest {
         assertThat(cql).contains("kind");
         assertThat(cql).contains("app_or_device_id");
         assertThat(cql).contains("default_time_to_live");
+    }
+
+    /**
+     * {@code allow} is a CQL RESERVED keyword (as in {@code ALLOW FILTERING}), so a
+     * column of that name has to be double-quoted or the statement is a syntax error.
+     *
+     * <p>Unquoted, migration 005 could not create {@code gateway_route_access} at all on
+     * a cluster that did not already have it — so the failure is invisible on any
+     * long-lived environment and total on a fresh or reseeded one, which is the worst
+     * possible distribution: it only appears when someone is standing up or recovering a
+     * mesh.
+     */
+    @Test
+    void theReservedWordColumnIsQuoted_soAFreshClusterCanCreateTheTable() throws Exception {
+        var field = CassandraSchemaMigrations.class.getDeclaredField("MIGRATIONS");
+        field.setAccessible(true);
+        @SuppressWarnings("unchecked")
+        java.util.LinkedHashMap<String, String> migrations =
+                (java.util.LinkedHashMap<String, String>) field.get(null);
+
+        String cql = migrations.get("005-gateway-route-access-table");
+        assertThat(cql).contains("\"allow\" boolean");
+    }
+
+    /**
+     * EVERY migration must be safe to replay, not just the ones that happen to be
+     * spelled that way today.
+     *
+     * <p>The per-environment {@code schema_migrations} gate is the first line of defence,
+     * but it is not the only path these statements take. The gate lives in the same
+     * keyspace it guards, so anything that rebuilds or reseeds the cluster — which this
+     * platform does routinely — brings back a schema whose columns already exist while
+     * the ledger saying so is gone. A bare {@code ALTER ... ADD} then fails with "column
+     * already exists" and takes gateway startup down with it, at exactly the moment an
+     * operator is trying to recover.
+     *
+     * <p>Asserted as a PROPERTY over the whole map rather than statement by statement,
+     * because the failure mode is a future migration appended without the guard — which
+     * a per-statement test written today cannot see.
+     */
+    @Test
+    void everyMigrationIsIdempotent_soAReseededClusterCanReplayThem() throws Exception {
+        var field = CassandraSchemaMigrations.class.getDeclaredField("MIGRATIONS");
+        field.setAccessible(true);
+        @SuppressWarnings("unchecked")
+        java.util.LinkedHashMap<String, String> migrations =
+                (java.util.LinkedHashMap<String, String>) field.get(null);
+
+        assertThat(migrations).isNotEmpty();
+        migrations.forEach((id, cql) -> {
+            String sql = cql.toUpperCase(java.util.Locale.ROOT);
+            if (sql.contains("CREATE TABLE")) {
+                assertThat(sql)
+                        .as("migration %s creates a table without IF NOT EXISTS", id)
+                        .contains("CREATE TABLE IF NOT EXISTS");
+            }
+            if (sql.contains(" ADD ")) {
+                assertThat(sql)
+                        .as("migration %s adds a column without IF NOT EXISTS", id)
+                        .contains("ADD IF NOT EXISTS");
+            }
+        });
     }
 }

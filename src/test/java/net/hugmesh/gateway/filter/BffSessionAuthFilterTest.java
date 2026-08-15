@@ -365,6 +365,49 @@ class BffSessionAuthFilterTest {
         assertThat(exchange.getResponse().getStatusCode()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
     }
 
+    /**
+     * THE REGRESSION THIS EXISTS FOR. The filter used to invoke chain.filter(exchange)
+     * INSIDE the pipeline its onErrorResume handlers wrap, so an error raised
+     * DOWNSTREAM — an unreachable upstream service, a proxy timeout, a codec error —
+     * was caught by the catch-all and reported as "BFF introspection call failed"
+     * with 503 {"error":"session_backend_unavailable"}.
+     *
+     * <p>Live on kind 2026-08-06, with a demonstrably healthy session (the same
+     * context had just read /bff/me, /bff/admin/usage and /bff/user/preferences at
+     * 200): GET /bff/mod/findings answered 503 session_backend_unavailable and logged
+     * "Failed to resolve 'hugmesh-mod-bff-api...'" — mod-bff simply was not deployed.
+     * The session backend was fine; the error named the wrong subsystem, which is the
+     * kind of misdirection that sends an operator into the auth stack during an
+     * incident that is really a dead service.
+     *
+     * <p>Introspection SUCCEEDS here and the downstream chain then fails. The filter
+     * must let that error propagate as itself rather than swallowing it into a
+     * session-backend 503.
+     */
+    @Test
+    void downstreamFailure_isNotReportedAsASessionBackendFailure() {
+        MeResponse healthy = new MeResponse("casdoor:e2e-admin", "casdoor",
+                List.of("user", "admin"), true, "active", false);
+        BffSessionAuthFilter f = filter(mockWebClient(Mono.just(healthy)));
+
+        MockServerHttpRequest req = MockServerHttpRequest.get("/bff/mod/findings")
+                .header(HttpHeaders.AUTHORIZATION, "Bearer bff_sometoken")
+                .build();
+        MockServerWebExchange exchange = MockServerWebExchange.from(req);
+
+        RuntimeException downstreamBoom =
+                new RuntimeException("Failed to resolve 'hugmesh-mod-bff-api.hugmesh-backend.svc.cluster.local'");
+        WebFilterChain chain = ex -> Mono.error(downstreamBoom);
+
+        // The downstream error surfaces as itself...
+        StepVerifier.create(f.filter(exchange, chain))
+                .verifyErrorMatches(t -> t == downstreamBoom);
+
+        // ...and the filter did NOT stamp a session-backend 503 over it.
+        assertThat(exchange.getResponse().getStatusCode())
+                .isNotEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
+    }
+
     // ── suspended account → 403, even on a 200 BFF response ──────────────────
 
     @Test

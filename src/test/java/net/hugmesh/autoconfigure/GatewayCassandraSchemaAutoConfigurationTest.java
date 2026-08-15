@@ -130,7 +130,7 @@ class GatewayCassandraSchemaAutoConfigurationTest {
             assertThat(migrations.get("006-hs-tokens-table"))
                     .contains("CREATE TABLE IF NOT EXISTS hs_tokens");
             assertThat(migrations.get("007-gateway-route-access-domain-column"))
-                    .contains("ALTER TABLE gateway_route_access ADD domain text");
+                    .contains("ALTER TABLE gateway_route_access ADD IF NOT EXISTS domain text");
         });
     }
 }
