@@ -115,13 +115,20 @@ class SecurityConfigPathGateSliceTest extends SecuritySliceSupport {
     @Test
     void anonymous_allowedOn_publicPaths() {
         // PUBLIC_PATHS — login / registration / public announcements / appeal-contact
-        // must be reachable with NO credentials.
+        // / the per-domain theme must be reachable with NO credentials.
+        //
+        // The theme pair is the newest and was the one that regressed: it served 200
+        // direct from the admin-bff and 401 through the gateway, so the PRE-AUTH login
+        // page rendered unbranded for every visitor. That is invisible to the Studio and
+        // the admin UI, which are authenticated and always saw a correctly-themed mesh.
         for (String path : List.of(
                 "/api/auth/token",
                 "/api/registration/start",
                 "/api/login/options",
                 "/bff/public/announcements/login",
-                "/bff/public/appeal-contact")) {
+                "/bff/public/appeal-contact",
+                "/bff/public/theme",
+                "/bff/public/theme.css")) {
             client.get().uri(path).exchange()
                     .expectStatus().value(s -> assertNot401Nor403(path, s));
         }
