@@ -165,6 +165,22 @@ public class SecurityConfig {
             // (CanonicalSeed.fe()) is ever consulted. Scoped to the exact route (NOT
             // a blanket /bff/public/**), mirroring the announcements precedent.
             "/bff/public/appeal-contact",
+            // Per-domain theme, both representations: the admin-bff exposes
+            // GET /bff/public/theme?domain=… (JSON) and GET /bff/public/theme.css
+            // (a stylesheet a page <link>s directly) UNAUTHENTICATED. They have to
+            // be: the surfaces that consume them include the PRE-AUTH login page and
+            // every anonymous visitor, and a theme that only authenticated users can
+            // fetch means the login page renders unbranded — the one page a visitor
+            // sees before they have any session at all. The 401 was invisible to the
+            // Studio and the admin UI, which are authenticated and so always saw a
+            // correctly-themed mesh.
+            // Serving these anonymously leaks nothing: PublicTheme is a projection
+            // that deliberately drops updatedBy (an administrator's JWT subject —
+            // here an email address) precisely so this endpoint can be public.
+            // Scoped to the exact routes, NOT a blanket /bff/public/**, mirroring the
+            // announcements and appeal-contact precedents above.
+            "/bff/public/theme",
+            "/bff/public/theme.css",
             // Native login credential submit (the NATIVE-LOGIN model). The
             // anonymous browser POSTs {username,password(,mfaPasscode)} to
             // /bff/login on OUR login-ui form BEFORE it holds any session or role
