@@ -6,9 +6,13 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
+import org.springframework.boot.webclient.WebClientCustomizer;
 import org.springframework.cloud.gateway.config.HttpClientCustomizer;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.http.client.reactive.ReactorClientHttpConnector;
+import org.springframework.web.reactive.function.client.WebClient;
+import reactor.netty.http.client.HttpClient;
 
 import javax.net.ssl.KeyManagerFactory;
 import javax.net.ssl.TrustManagerFactory;
@@ -68,12 +72,52 @@ public class DownstreamMtlsConfig {
      *                   back to plaintext or an insecure trust manager
      */
     @Bean
-    public HttpClientCustomizer downstreamMtlsHttpClientCustomizer(DownstreamMtlsProperties props) throws Exception {
-        final SslContext sslContext = buildClientSslContext(props);
+    public SslContext downstreamMtlsSslContext(DownstreamMtlsProperties props) throws Exception {
+        SslContext ctx = buildClientSslContext(props);
         log.info("Downstream mTLS ENABLED: gateway will present client cert from {} and validate "
                         + "backend server certs against {}",
                 props.getKeyStore(), props.getTrustStore());
-        return httpClient -> httpClient.secure(spec -> spec.sslContext(sslContext));
+        return ctx;
+    }
+
+    @Bean
+    public HttpClientCustomizer downstreamMtlsHttpClientCustomizer(SslContext downstreamMtlsSslContext) {
+        return httpClient -> httpClient.secure(spec -> spec.sslContext(downstreamMtlsSslContext));
+    }
+
+    /**
+     * The SAME SslContext, applied to every {@link WebClient} built from Boot's
+     * auto-configured {@link WebClient.Builder}.
+     *
+     * <p><b>Why this is a SEPARATE bean and not covered by the one above.</b>
+     * {@link HttpClientCustomizer} is a <em>Spring Cloud Gateway</em> interface;
+     * SCG's {@code HttpClientFactory} applies it to the shared HttpClient that
+     * forwards ROUTED traffic. Boot's {@code WebClient.Builder} knows nothing about
+     * it — it consults {@link WebClientCustomizer} beans instead. So a WebClient
+     * built from the auto-configured builder got the DEFAULT JDK trust, which holds
+     * public roots and never the cluster CA.
+     *
+     * <p>{@code BffSessionConfig.bffIntrospectWebClient} is exactly such a client,
+     * and its javadoc asserted the opposite — "customized by e.g. DownstreamMtlsConfig
+     * when mTLS is enabled". That sentence was false, and it is the reason the session
+     * bridge could not work against a TLS backend. Live on kind 2026-08-06, after the
+     * generator fixed BFF_BASE_URL from http:// to https://, the failure moved from
+     *
+     *     Connection prematurely closed BEFORE response          (plaintext into a TLS port)
+     * to
+     *     (certificate_unknown) PKIX path building failed        (TLS, but default trust)
+     *
+     * and every /bff/session read still answered 503
+     * {@code {"error":"session_backend_unavailable"}} for a freshly minted, valid
+     * session. Both errors are this one bean's absence.
+     *
+     * <p>Safe for plain-http peers: a reactor-netty SslContext engages only for
+     * {@code https://} URLs, so WebClients addressing http:// backends are unaffected.
+     */
+    @Bean
+    public WebClientCustomizer downstreamMtlsWebClientCustomizer(SslContext downstreamMtlsSslContext) {
+        return builder -> builder.clientConnector(new ReactorClientHttpConnector(
+                HttpClient.create().secure(spec -> spec.sslContext(downstreamMtlsSslContext))));
     }
 
     /** Assemble a Netty client SslContext: keyManager = identity, trustManager = cluster CA. */

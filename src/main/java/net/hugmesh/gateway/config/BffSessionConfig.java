@@ -37,8 +37,15 @@ public class BffSessionConfig {
      * (inheriting any reactor-netty TLS / codec customizations already applied by
      * Boot) but sets the base URL from {@link BffSessionProperties#getBffBaseUrl()}.
      *
-     * @param builder the Spring Boot auto-configured builder (customized by e.g.
-     *                {@link DownstreamMtlsConfig} when mTLS is enabled)
+     * <p>The mTLS leg reaches this client through {@code DownstreamMtlsConfig}'s
+     * {@code WebClientCustomizer} — NOT its {@code HttpClientCustomizer}, which is a
+     * Spring Cloud Gateway hook that only touches the routed-proxy HttpClient. This
+     * javadoc previously claimed the builder was "customized by DownstreamMtlsConfig",
+     * which was false: no such customizer existed for WebClients, so this client used
+     * the JDK default trust and every introspection call against a TLS backend failed
+     * with PKIX path building failed → 503 session_backend_unavailable.
+     *
+     * @param builder the Spring Boot auto-configured builder
      * @param props   the BFF session properties
      * @return a fully configured WebClient ready to call {@code /bff/me}
      */

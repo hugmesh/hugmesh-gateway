@@ -7,6 +7,7 @@ import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.core.Authentication;
 import org.springframework.security.core.GrantedAuthority;
 import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.security.core.context.ReactiveSecurityContextHolder;
@@ -145,35 +146,32 @@ public class BffSessionAuthFilter implements WebFilter, Ordered {
         // Forward the original client IP so BFF audit logs record the real address.
         String clientIp = remoteAddress(exchange);
 
+        // SCOPE THE ERROR HANDLING TO THE INTROSPECTION CALL ONLY.
+        //
+        // This used to invoke chain.filter(exchange) INSIDE the pipeline the two
+        // onErrorResume handlers below wrap, so ANY error raised downstream — an
+        // unreachable upstream service, a proxy timeout, a codec error — was caught
+        // by the catch-all and reported as "BFF introspection call failed", with a
+        // 503 {"error":"session_backend_unavailable"} body.
+        //
+        // Live on kind 2026-08-06, with a perfectly healthy session (the SAME context
+        // had just read /bff/me, /bff/admin/usage and /bff/user/preferences at 200):
+        //   GET /bff/mod/findings -> 503 session_backend_unavailable
+        //   [bff-session] BFF introspection call failed:
+        //   Failed to resolve 'hugmesh-mod-bff-api.hugmesh-backend.svc.cluster.local'
+        // mod-bff simply is not deployed in that profile. The session backend was
+        // fine; the message named the wrong subsystem entirely, which is precisely
+        // the class of misdirection that costs hours on an incident.
+        //
+        // The introspection outcome is now resolved to a DECISION first, and the
+        // chain runs outside the error scope — the same shape user-bff's sibling
+        // BffSessionAuthenticationWebFilter already uses (resolve() -> Decision ->
+        // filter()). Fail-closed behaviour is unchanged: every error path still
+        // yields 503/403/pass-through exactly as before, and the 27 existing tests
+        // (bff5xx_failsClosed_returns503, bffUnreachable_failsClosed_returns503,
+        // bff401_passesThrough_unauthenticated, suspended/banned 403, …) pin that.
         return introspect(token, clientIp)
-                .flatMap(me -> {
-                    // Suspended or banned — explicit status check (BFF may return 200
-                    // with status:"suspended" in some code paths; never trust 200 alone).
-                    String status = me.status();
-                    if ("suspended".equalsIgnoreCase(status) || "banned".equalsIgnoreCase(status)) {
-                        log.warn("[bff-session] denied — account status={} id={}", status, me.id());
-                        return rejectForbidden(exchange, "account-" + status.toLowerCase());
-                    }
-
-                    List<GrantedAuthority> authorities = buildAuthorities(me);
-                    String principalName = me.id();
-                    UsernamePasswordAuthenticationToken auth =
-                            new UsernamePasswordAuthenticationToken(principalName, null, authorities);
-                    // A5 part-B: carry the introspect-supplied Casdoor sub UUID to the
-                    // route-access filter (which folds it into the casdoor_user pin-match
-                    // identity set) via the token's details slot. ONLY when present and
-                    // non-blank — a legacy/absent field leaves details null, so the token
-                    // is byte-identical to the pre-field one (no behavior change).
-                    if (me.casdoorSub() != null && !me.casdoorSub().isBlank()) {
-                        auth.setDetails(new SessionDetails(me.casdoorSub().trim()));
-                    }
-
-                    log.debug("[bff-session] authenticated id={} roles={} mfa={}",
-                            me.id(), me.roles(), me.mfaSatisfied());
-
-                    return chain.filter(exchange)
-                            .contextWrite(ReactiveSecurityContextHolder.withAuthentication(auth));
-                })
+                .map(this::decide)
                 .onErrorResume(WebClientResponseException.class, ex -> {
                     int status = ex.getStatusCode().value();
                     if (status == 401) {
@@ -181,22 +179,91 @@ public class BffSessionAuthFilter implements WebFilter, Ordered {
                         // The downstream authenticated() rule produces a 401 for
                         // protected paths; public paths succeed.
                         log.debug("[bff-session] token not found or expired (BFF 401) — passing through unauthenticated");
-                        return chain.filter(exchange);
+                        return Mono.just(Decision.passThrough());
                     }
                     if (status == 403) {
                         log.warn("[bff-session] BFF returned 403 for token — rejecting");
-                        return rejectForbidden(exchange, "bff-forbidden");
+                        return Mono.just(Decision.forbidden("bff-forbidden"));
                     }
                     // 5xx or unexpected — fail-closed: do NOT allow unauthenticated through.
                     log.error("[bff-session] BFF introspection error (status={}) — returning 503", status);
-                    return rejectServiceUnavailable(exchange);
+                    return Mono.just(Decision.unavailable());
                 })
                 .onErrorResume(ex -> {
                     // Connection refused, timeout, codec error, etc. — fail-closed.
+                    // Reached ONLY for failures of the introspection call itself now.
                     log.error("[bff-session] BFF introspection call failed: {} — returning 503", ex.getMessage());
-                    return rejectServiceUnavailable(exchange);
+                    return Mono.just(Decision.unavailable());
+                })
+                .flatMap(decision -> {
+                    if (decision.forbiddenReason() != null) {
+                        return rejectForbidden(exchange, decision.forbiddenReason());
+                    }
+                    if (decision.serviceUnavailable()) {
+                        return rejectServiceUnavailable(exchange);
+                    }
+                    if (decision.auth() == null) {
+                        return chain.filter(exchange);
+                    }
+                    return chain.filter(exchange)
+                            .contextWrite(ReactiveSecurityContextHolder.withAuthentication(decision.auth()));
                 });
     }
+
+    /**
+     * Turn a successful introspection into a {@link Decision}. Identical logic to the
+     * former inline success branch — the suspended/banned check and the authority
+     * build — just resolved before the chain runs.
+     */
+    private Decision decide(MeResponse me) {
+        // Suspended or banned — explicit status check (BFF may return 200
+        // with status:"suspended" in some code paths; never trust 200 alone).
+        String status = me.status();
+        if ("suspended".equalsIgnoreCase(status) || "banned".equalsIgnoreCase(status)) {
+            log.warn("[bff-session] denied — account status={} id={}", status, me.id());
+            return Decision.forbidden("account-" + status.toLowerCase());
+        }
+
+        List<GrantedAuthority> authorities = buildAuthorities(me);
+        String principalName = me.id();
+        UsernamePasswordAuthenticationToken auth =
+                new UsernamePasswordAuthenticationToken(principalName, null, authorities);
+        // A5 part-B: carry the introspect-supplied Casdoor sub UUID to the
+        // route-access filter (which folds it into the casdoor_user pin-match
+        // identity set) via the token's details slot. ONLY when present and
+        // non-blank — a legacy/absent field leaves details null, so the token
+        // is byte-identical to the pre-field one (no behavior change).
+        if (me.casdoorSub() != null && !me.casdoorSub().isBlank()) {
+            auth.setDetails(new SessionDetails(me.casdoorSub().trim()));
+        }
+
+        log.debug("[bff-session] authenticated id={} roles={} mfa={}",
+                me.id(), me.roles(), me.mfaSatisfied());
+        return new Decision(auth, null, false);
+    }
+
+    /**
+     * What introspection concluded, decided BEFORE the downstream chain runs so a
+     * downstream failure can never be attributed to the session backend.
+     *
+     * <p>Exactly one of the three is meaningful: {@code forbiddenReason} non-null
+     * (403), {@code unavailable} true (503), or {@code auth} — non-null to
+     * authenticate, null to pass through unauthenticated.
+     */
+    private record Decision(Authentication auth, String forbiddenReason, boolean serviceUnavailable) {
+        static Decision passThrough() {
+            return new Decision(null, null, false);
+        }
+
+        static Decision forbidden(String reason) {
+            return new Decision(null, reason, false);
+        }
+
+        static Decision unavailable() {
+            return new Decision(null, null, true);
+        }
+    }
+
 
     // ── token extraction ──────────────────────────────────────────────────────
 

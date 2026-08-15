@@ -132,7 +132,7 @@ public class CassandraSchemaMigrations {
             "  url_pattern text," +
             "  role text," +
             "  casdoor_user text," +
-            "  allow boolean," +
+            "  \"allow\" boolean," +
             "  updated_at timestamp" +
             ")");
 
@@ -176,7 +176,7 @@ public class CassandraSchemaMigrations {
         // and must not be edited); the schema_migrations gate makes the ALTER run
         // exactly once per environment.
         MIGRATIONS.put("007-gateway-route-access-domain-column",
-            "ALTER TABLE gateway_route_access ADD domain text");
+            "ALTER TABLE gateway_route_access ADD IF NOT EXISTS domain text");
 
         // Per-route StripPrefix support for the DB-driven route-DEFINITION table.
         // Lets a url_registry row reproduce the static be-default route's
@@ -190,7 +190,7 @@ public class CassandraSchemaMigrations {
         // a shipped entry and must not be edited); the schema_migrations gate makes
         // the ALTER run exactly once per environment.
         MIGRATIONS.put("008-url-registry-strip-prefix-column",
-            "ALTER TABLE url_registry ADD strip_prefix int");
+            "ALTER TABLE url_registry ADD IF NOT EXISTS strip_prefix int");
 
         // Per-row OWNING BRAND scope for the revocation list (multi-brand
         // architecture tier — closes the cross-tenant revocation BFLA, CWE-639).
@@ -207,7 +207,7 @@ public class CassandraSchemaMigrations {
         // must not be edited); the schema_migrations gate makes the ALTER run
         // exactly once per environment.
         MIGRATIONS.put("009-revocations-domain-column",
-            "ALTER TABLE revocations ADD domain text");
+            "ALTER TABLE revocations ADD IF NOT EXISTS domain text");
 
         // Per-row SECOND-FACTOR gate for the route-access read-cache (D8 gateway
         // MFA floor). Mirrors the Postgres SOURCE OF TRUTH's new `mfa_required`
@@ -226,7 +226,7 @@ public class CassandraSchemaMigrations {
         // 009-revocations-domain-column); the schema_migrations gate makes the
         // ALTER run exactly once per environment.
         MIGRATIONS.put("010-gateway-route-access-mfa-required-column",
-            "ALTER TABLE gateway_route_access ADD mfa_required boolean");
+            "ALTER TABLE gateway_route_access ADD IF NOT EXISTS mfa_required boolean");
     }
 
     private final ReactiveCqlOperations cql;
