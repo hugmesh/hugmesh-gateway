@@ -41,7 +41,7 @@ work" — are merged. Each maps to source in this repo.
 | **`bff_`/cookie introspection bridge** (`GET /bff/internal/session/introspect` → SecurityContext, fail-closed; **live by default** `app.bff-session.enabled` since PR #70, was dark at #51/#55/#57) (PR #51, #55, #57, #70) | [BffSessionAuthFilter.java](src/main/java/net/hugmesh/gateway/filter/BffSessionAuthFilter.java) |
 | **D6/D8 MFA gateway floor** — `mfa_required` column on `gateway_route_access`, `MFA_SATISFIED` authority in `CasdoorAuthorities`, privileged-route MFA floor in `GatewayRouteAccessFilter`; all three **ship dark** (`app.mfa.enabled` / `app.mfa.enforce-privileged-floor`, default off) (PR #40) | [CasdoorAuthorities.java](src/main/java/net/hugmesh/gateway/config/CasdoorAuthorities.java), [GatewayRouteAccessFilter.java](src/main/java/net/hugmesh/gateway/filter/GatewayRouteAccessFilter.java) |
 | **CSRF-disabled-by-design guard test** — asserts the bearer gateway keeps `csrf.disable()` (correct by construction; defends against a scanner "fix" that would 403 every bearer POST) (PR #49) | [CsrfDocGuardTest.java](src/test/java/net/hugmesh/gateway/config/CsrfDocGuardTest.java) |
-| OWASP pen-test CI leg (`test → security → build → pentest`, centralized SCA + ZAP DAST via `hugmesh-generator` include) | [.gitlab-ci.yml](.gitlab-ci.yml) (PR #29, #31) |
+| OWASP pen-test CI leg (`test → build → pentest`, centralized SCA + ZAP DAST via `hugmesh-generator` include) | [.gitlab-ci.yml](.gitlab-ci.yml) (PR #29, #31) |
 | Multi-instance Dockerfile + compose | [Dockerfile](Dockerfile), [compose.yaml](compose.yaml) |
 | Spring Cloud Circuit Breaker dependency | [pom.xml](pom.xml) |
 | Unit + context tests | [src/test/](src/test/java/net/hugmesh/gateway/) |

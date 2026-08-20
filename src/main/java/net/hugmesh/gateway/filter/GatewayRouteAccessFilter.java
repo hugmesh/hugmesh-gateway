@@ -350,7 +350,16 @@ public class GatewayRouteAccessFilter implements WebFilter, Ordered {
                 // anonymous/public reads to the requesting brand) needs an `X-Domain`
                 // header carrying this validated value, mirroring how
                 // ExternalAuthHeaderFilter forwards External-Authorization/External-Auth-Provider/External-Auth-Id.
-                // Not added speculatively here — no downstream consumer exists yet.
+                // Not added speculatively here — no downstream consumer exists yet
+                // (the only X-Domain-ish header in the org is games' X-Domain-Denied
+                // RESPONSE header, and games' DomainGuardFilter scopes off the JWT's
+                // DOMAIN_ authority, not a forwarded request header).
+                // ⚠ Whoever implements this MUST strip any CLIENT-supplied X-Domain
+                // first — unconditionally, on every path, exactly as
+                // ExternalAuthHeaderFilter.stripInbound does for the External-* trio —
+                // or the header becomes a brand-spoof injection vector: a caller could
+                // forge X-Domain and read another brand's public partition through a
+                // downstream that trusts the gateway to have validated it.
                 return chain.filter(exchange);
             });
     }

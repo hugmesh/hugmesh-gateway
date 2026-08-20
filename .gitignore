@@ -31,3 +31,11 @@ build/
 
 ### VS Code ###
 .vscode/
+
+### Stray dependency source/class dumps at the repo root ###
+# This project's Java lives under src/ only. A top-level io/ or org/ tree is an
+# accidental sources-jar unzip or IDE decompile dump of a dependency, never
+# anything this repo authors, so keep it from being swept back in by a broad
+# `git add`.
+/io/
+/org/

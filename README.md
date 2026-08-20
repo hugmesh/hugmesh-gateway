@@ -420,10 +420,10 @@ see *CI / security* below for why GitHub Actions alone won't catch regressions y
 The project's primary CI runs on an in-cluster **GitLab** instance that mirrors this
 GitHub repository (`.gitlab-ci.yml`); GitHub Actions currently only hosts a manual,
 `workflow_dispatch`-only [release workflow](.github/workflows/release.yml) that
-builds and publishes the container image to GHCR. Stages: `test → security → build
-→ pentest` (the `security` stage is currently a no-op — its only job, inline
-`dependency-check`, was migrated onto the centralized `pentest:sca` job below when
-the `pentest` stage was added; see the TODO in `.gitlab-ci.yml`). `test` runs
+builds and publishes the container image to GHCR. Stages: `test → build →
+pentest` (a former `security` stage was dropped once verified dead — its only
+job, inline `dependency-check`, had been migrated onto the centralized
+`pentest:sca` job below when the `pentest` stage was added). `test` runs
 `./mvnw verify` (with JUnit reports) and `build:image` builds + pushes the
 container image. The pentest leg is the per-repo arm of the platform's OWASP
 pen-test standard: it `include:`s the centralized hidden jobs from
@@ -447,19 +447,6 @@ forward-looking, not-yet-started work in *Roadmap* below):
   cache for a zero-window posture). PR #68 bounded what was previously an
   unclamped (effectively 60s-default) window. Documented in
   `src/main/java/net/hugmesh/gateway/filter/BffJwtExchangeWebFilter.java`.
-- **`compose.yaml` still names its dev instance after the pre-unification scheme,
-  not the current `hugmesh-{pki,be,fe}-gateway` / `${BRAND}-{pki,be,fe}-gateway`
-  convention** described above and in `ROADMAP.md`. It wires a service named
-  `hugmesh-games-gateway` with `SPRING_APPLICATION_NAME: hugmesh-games-gateway`,
-  and `compose/route-access-seed.sql` carries a matching demo row block under that
-  same name, separate from the canonical pki/be/fe rows the rest of the seed file
-  covers. That name doesn't match `application.yml`'s own default
-  (`SPRING_APPLICATION_NAME=hugmesh-be-gateway`) or any of the three shipped tiers.
-  The `Dockerfile`'s own comment about this has since been corrected; the
-  `compose.yaml` service itself is still on the to-do list since fixing it is a
-  functional dev-tooling change, not a docs fix. This tracks with `ROADMAP.md`'s
-  item 1 ("Per-instance deployment config") still being 🔭 planned — the dev-loop
-  tooling hasn't been updated to the shipped pki/be/fe naming yet.
 - **Downstream mTLS's store passwords (`hugmesh.tls.*`) may never actually bind
   in-cluster — unverified against the chart.** `application-tls.properties` (the
   file the chart's `build-keystore` initContainer writes the real generated PKCS12

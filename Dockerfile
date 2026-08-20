@@ -26,7 +26,6 @@ EXPOSE 8080
 # application.yml (see src/main/resources/application.yml); override
 # SPRING_APPLICATION_NAME at deploy time to spin up the same image as
 # hugmesh-pki-gateway / hugmesh-fe-gateway, or per-brand
-# ${BRAND}-{pki,be,fe}-gateway. (This repo's own compose.yaml still runs the
-# dev stack under the pre-unification hugmesh-games-gateway name — see
-# README's Known Gaps.)
+# ${BRAND}-{pki,be,fe}-gateway. (This repo's own compose.yaml runs the dev
+# stack on that same hugmesh-be-gateway default.)
 ENTRYPOINT ["java", "-jar", "/app/app.jar"]
