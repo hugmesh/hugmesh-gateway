@@ -95,7 +95,7 @@ a public/homeserver path), and these ordered `WebFilter`s run:
 
 | Order | Filter | Purpose |
 |------:|--------|---------|
-| HIGHEST+4 | `BffCookieToBearerWebFilter` *(dark)* | pre-security cookie-mode bridge: synthesises `Authorization: Bearer bff_…` from the `bff_session` cookie (and strips that cookie) so a cookie-only browser request reaches the exchange filter below; **absent** unless `hugmesh.gateway.bff-exchange.enabled` (same flag as the exchange filter) |
+| HIGHEST+4 | `BffCookieToBearerWebFilter` *(dark)* | pre-security cookie-mode bridge: synthesises `Authorization: Bearer bff_…` from the `bff_session` cookie (which is **retained** on the forwarded request) so a cookie-only browser request reaches the exchange filter below; **absent** unless `hugmesh.gateway.bff-exchange.enabled` (same flag as the exchange filter) |
 | HIGHEST+5 | `BffJwtExchangeWebFilter` *(dark)* | pre-security `bff_`→custody-JWT swap; **absent** unless `hugmesh.gateway.bff-exchange.enabled` |
 | HIGHEST+50 | `BffSessionAuthFilter` *(live by default)* | pre-security `bff_`/cookie introspection → SecurityContext; present unless `app.bff-session.enabled=false` |
 | 10 | `RevocationGatewayFilter` | reject revoked **Casdoor JWTs** (Cassandra-cached revocation list) |
@@ -214,11 +214,12 @@ described above.
 
 A third filter, `BffCookieToBearerWebFilter` (#66, same flag as the exchange path,
 order `HIGHEST_PRECEDENCE + 4`), sits one slot ahead of `BffJwtExchangeWebFilter` and
-synthesises `Authorization: Bearer bff_…` from the `bff_session` cookie (stripping
-the cookie from the forwarded request) when no `Authorization` header is already
-present — so the exchange path's effective "Token source" below is really *header
-**or** cookie*, mirroring `BffSessionAuthFilter`'s dual token source. See *Request
-pipeline* above.
+synthesises `Authorization: Bearer bff_…` from the `bff_session` cookie (which is
+**retained** on the forwarded request — consuming it starved the cookie-terminated
+BFF surfaces, notably user-bff's permitAll `GET /bff/session`) when no
+`Authorization` header is already present — so the exchange path's effective "Token
+source" below is really *header **or** cookie*, mirroring `BffSessionAuthFilter`'s
+dual token source. See *Request pipeline* above.
 
 | | `BffJwtExchangeWebFilter` (#48) | `BffSessionAuthFilter` (#51) |
 |---|---|---|
@@ -446,11 +447,6 @@ forward-looking, not-yet-started work in *Roadmap* below):
   cache for a zero-window posture). PR #68 bounded what was previously an
   unclamped (effectively 60s-default) window. Documented in
   `src/main/java/net/hugmesh/gateway/filter/BffJwtExchangeWebFilter.java`.
-- **`BffCookieToBearerWebFilter` has no dedicated unit test** — shipped on `main`
-  (PR #66) and covered indirectly by whatever exercises the exchange path end to end,
-  but there is no `BffCookieToBearerWebFilterTest` (contrast with
-  `BffJwtExchangeWebFilterTest` / `BffSessionAuthFilterTest`, which each have one)
-  (`src/main/java/net/hugmesh/gateway/filter/BffCookieToBearerWebFilter.java`).
 - **`compose.yaml` still names its dev instance after the pre-unification scheme,
   not the current `hugmesh-{pki,be,fe}-gateway` / `${BRAND}-{pki,be,fe}-gateway`
   convention** described above and in `ROADMAP.md`. It wires a service named
