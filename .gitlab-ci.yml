@@ -12,14 +12,12 @@ include:
     ref: main
     file: '/tests/pentest/ci/pentest-stage.gitlab-ci.yml'
 
-# TODO: `security` looks like a dead stage — the inline P2-1 `dependency-check`
-# job that used to run in it was migrated to `pentest:sca` (in the `pentest`
-# stage below) back when the pentest stage was added; no job in this file
-# declares `stage: security` anymore. Kept here defensively since this repo
-# can't confirm offline whether the included generator hidden jobs
-# (`.pentest-sca` / `.pentest-dast-baseline`) still target it — verify against
-# hugmesh-generator's pentest-stage.gitlab-ci.yml before dropping it.
-stages: [test, security, build, pentest]
+# Must list every stage used here AND by the included hidden jobs — all of the
+# generator's `.pentest-*` jobs declare `stage: pentest`. The former `security`
+# stage was dropped once verified dead: its only job, the inline P2-1
+# `dependency-check`, was migrated to `pentest:sca` when the pentest stage was
+# added, and nothing in this file or the include targets `security` anymore.
+stages: [test, build, pentest]
 
 test:
   stage: test

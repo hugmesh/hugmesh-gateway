@@ -419,10 +419,10 @@ see *CI / security* below for why GitHub Actions alone won't catch regressions y
 The project's primary CI runs on an in-cluster **GitLab** instance that mirrors this
 GitHub repository (`.gitlab-ci.yml`); GitHub Actions currently only hosts a manual,
 `workflow_dispatch`-only [release workflow](.github/workflows/release.yml) that
-builds and publishes the container image to GHCR. Stages: `test → security → build
-→ pentest` (the `security` stage is currently a no-op — its only job, inline
-`dependency-check`, was migrated onto the centralized `pentest:sca` job below when
-the `pentest` stage was added; see the TODO in `.gitlab-ci.yml`). `test` runs
+builds and publishes the container image to GHCR. Stages: `test → build →
+pentest` (a former `security` stage was dropped once verified dead — its only
+job, inline `dependency-check`, had been migrated onto the centralized
+`pentest:sca` job below when the `pentest` stage was added). `test` runs
 `./mvnw verify` (with JUnit reports) and `build:image` builds + pushes the
 container image. The pentest leg is the per-repo arm of the platform's OWASP
 pen-test standard: it `include:`s the centralized hidden jobs from
