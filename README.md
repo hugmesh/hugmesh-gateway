@@ -451,19 +451,6 @@ forward-looking, not-yet-started work in *Roadmap* below):
   but there is no `BffCookieToBearerWebFilterTest` (contrast with
   `BffJwtExchangeWebFilterTest` / `BffSessionAuthFilterTest`, which each have one)
   (`src/main/java/net/hugmesh/gateway/filter/BffCookieToBearerWebFilter.java`).
-- **`compose.yaml` still names its dev instance after the pre-unification scheme,
-  not the current `hugmesh-{pki,be,fe}-gateway` / `${BRAND}-{pki,be,fe}-gateway`
-  convention** described above and in `ROADMAP.md`. It wires a service named
-  `hugmesh-games-gateway` with `SPRING_APPLICATION_NAME: hugmesh-games-gateway`,
-  and `compose/route-access-seed.sql` carries a matching demo row block under that
-  same name, separate from the canonical pki/be/fe rows the rest of the seed file
-  covers. That name doesn't match `application.yml`'s own default
-  (`SPRING_APPLICATION_NAME=hugmesh-be-gateway`) or any of the three shipped tiers.
-  The `Dockerfile`'s own comment about this has since been corrected; the
-  `compose.yaml` service itself is still on the to-do list since fixing it is a
-  functional dev-tooling change, not a docs fix. This tracks with `ROADMAP.md`'s
-  item 1 ("Per-instance deployment config") still being 🔭 planned — the dev-loop
-  tooling hasn't been updated to the shipped pki/be/fe naming yet.
 - **Downstream mTLS's store passwords (`hugmesh.tls.*`) may never actually bind
   in-cluster — unverified against the chart.** `application-tls.properties` (the
   file the chart's `build-keystore` initContainer writes the real generated PKCS12

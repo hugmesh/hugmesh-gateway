@@ -139,9 +139,5 @@ INSERT INTO gateway_route_access (gateway, url_pattern, role, allow) VALUES
   -- INTERNAL INGEST") + the baked CanonicalSeed.fe() deny rows, byte-for-byte.
   ('hugmesh-fe-gateway',   '/bff/user/internal/**', 'ROLE_USER', false),
   ('hugmesh-fe-gateway',   '/bff/mesh/internal/**', 'ROLE_USER', false),
-  ('hugmesh-fe-gateway',   '/bff/internal/**',      'ROLE_USER', false),
-  -- games-gateway (the compose default SPRING_APPLICATION_NAME)
-  ('hugmesh-games-gateway','/api/auth/**',          'PUBLIC',     true),
-  ('hugmesh-games-gateway','/api/**',               'ROLE_USER',  true),
-  ('hugmesh-games-gateway','/api/admin/**',         'ROLE_ADMIN', true)
+  ('hugmesh-fe-gateway',   '/bff/internal/**',      'ROLE_USER', false)
 ON CONFLICT DO NOTHING;
