@@ -284,6 +284,42 @@ class GatewayRouteAccessServiceTest {
     }
 
     @Test
+    void canonicalSeed_beGateway_edgeAiTtsSynthesizeFloorsOnRoleUser() {
+        // edge-ai-tts (OPTIONAL slug `edge-ai-tts`): matrix-ui's voice synthesis
+        // lives on its OWN /v1 path space, not under the /api/** floor, so it needs
+        // its own baked row. Anonymous must be DENIED (governed-but-ungranted, NOT
+        // NO_RULE — the baked floor keeps the surface governed on the
+        // datastore-unreachable fallback) and a plain ROLE_USER reaches it.
+        var seed = CanonicalSeed.forGateway("hugmesh-be-gateway");
+        var s = new GatewayRouteAccessService(null, null, "hugmesh-be-gateway", true, false, null);
+        s.primeForTest(seed);
+        assertThat(s.decide("/v1/synthesize", "default", List.of(), List.of()))
+            .isEqualTo(Decision.DENY);
+        assertThat(s.decide("/v1/synthesize/stream", "default", List.of(), List.of()))
+            .isEqualTo(Decision.DENY);
+        assertThat(s.decide("/v1/synthesize", "default", List.of("u1"), List.of("ROLE_USER")))
+            .isEqualTo(Decision.ALLOW);
+        assertThat(s.decide("/v1/synthesize/stream", "default", List.of("u1"), List.of("ROLE_USER")))
+            .isEqualTo(Decision.ALLOW);
+        // Congruence guard: the seed row itself must floor on ROLE_USER (no
+        // ROLE_ADMIN pairing on a capability floor — admins reach it via the
+        // cross-domain bypass), mirroring the cluster Postgres seed row.
+        assertThat(seed)
+            .as("/v1/synthesize/** must be a ROLE_USER allow row in the be seed")
+            .anyMatch(r -> "/v1/synthesize/**".equals(r.urlPattern())
+                    && "ROLE_USER".equals(r.role()) && r.allow());
+        assertThat(seed)
+            .as("/v1/synthesize/** must not carry any non-ROLE_USER rule")
+            .noneMatch(r -> "/v1/synthesize/**".equals(r.urlPattern()) && !"ROLE_USER".equals(r.role()));
+        // The row is SCOPED to the synthesize sub-path: it must not widen the
+        // baked floor over the rest of the /v1 inference space (the edge-ai
+        // `/v1/**` + edge-ai-analysis `/v1/analyze/**` rows are carried only by
+        // the Postgres seed), so a sibling /v1 path stays NO_RULE here.
+        assertThat(s.decide("/v1/chat/completions", "default", List.of(), List.of()))
+            .isEqualTo(Decision.NO_RULE);
+    }
+
+    @Test
     void canonicalSeed_beGateway_noResidualBroadUserHomeserverRow() {
         // Seed-parity guard: there must be NO ROLE_USER allow row at the bare
         // homeserver patterns (the ban/congruence design REMOVED them). If a

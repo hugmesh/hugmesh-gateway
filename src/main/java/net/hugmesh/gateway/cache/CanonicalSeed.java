@@ -238,13 +238,24 @@ final class CanonicalSeed {
                 r(BE, "/games/**",              "ROLE_ADMIN"),       // (admins superset)
                 r(BE, "/games/**",              "ROLE_MOD"),         // (mods superset)
                 // hugmesh-apis floor (NOT a homeserver surface) keeps ROLE_USER.
-                // TODO: matrix-ui's optional edge-ai-tts voice synthesis needs a
-                // `/v1/synthesize/** = ROLE_USER` row here once the feature lands —
-                // the image is unbuilt/unpushed and no k8s manifests exist yet
-                // (cross-repo infra), so this route-access entry would be dead
-                // weight today. Add it alongside that rollout, not before.
                 r(BE, "/api/**",                "ROLE_USER"),
-                r(BE, "/api/admin/**",          "ROLE_ADMIN"));
+                r(BE, "/api/admin/**",          "ROLE_ADMIN"),
+                // ── edge-ai-tts voice synthesis (OPTIONAL slug `edge-ai-tts`) ────
+                // matrix-ui's optional voice synthesis calls the Piper TTS wrapper
+                // on its own /v1 path space (the be-gateway `edge-ai-tts` route,
+                // NOT under /api/**), so it needs its own row. Authenticated floor:
+                // a single ROLE_USER row, mirroring the cluster Postgres seed
+                // (specs/cluster/manifests/route-access/initdb/20-schema.sql) — no
+                // ROLE_ADMIN pairing, because this is a capability floor and the
+                // converter does not auto-grant ROLE_USER to admins (admins reach it
+                // via the cross-domain bypass). The cross-repo infra this was waiting
+                // on has landed (manifests + image + the ArgoCD app + the be-gateway
+                // route + the Postgres row), so the baked floor keeps the surface
+                // GOVERNED on the datastore-unreachable fallback instead of leaving
+                // it ungoverned. When the slug is deselected gate_optional_services
+                // prunes the Postgres row + the route; this floor stays closed-by-
+                // default either way.
+                r(BE, "/v1/synthesize/**",      "ROLE_USER"));
     }
 
     private static List<Rule> fe() {
