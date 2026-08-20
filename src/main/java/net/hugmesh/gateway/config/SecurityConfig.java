@@ -212,7 +212,7 @@ public class SecurityConfig {
      *       anonymous request BEFORE that rule was ever consulted (verified live:
      *       anonymous {@code GET /} through the compose front door returned 401
      *       despite the PUBLIC row). The fe catch-all proxies to the
-     *       systems-web nginx (Angular browser build at the webroot +
+     *       host-shell nginx (Angular browser build at the webroot +
      *       {@code try_files ... /index.html}), so the anonymous front page needs
      *       the document ({@code /}, {@code /index.html}), the root-level hashed
      *       bundles ({@code /*.js}, {@code /*.css} — Ant {@code *} does not cross
