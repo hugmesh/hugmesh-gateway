@@ -8,7 +8,7 @@
 # OWASP Dependency-Check + authenticated ZAP DAST + probes/nuclei harness) from
 # the generator so there is ONE source of truth across onboarded repos.
 include:
-  - project: 'HugMesh/hugmesh-generator'
+  - project: 'hugmesh/hugmesh-generator'
     ref: main
     file: '/tests/pentest/ci/pentest-stage.gitlab-ci.yml'
 
