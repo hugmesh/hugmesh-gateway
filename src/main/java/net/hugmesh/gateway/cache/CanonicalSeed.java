@@ -263,7 +263,7 @@ final class CanonicalSeed {
                 r(FE, "/",                  "PUBLIC"),
                 // The rest of the anonymous SPA shell the '/' row already implies:
                 // the document, the root-level hashed bundles the Angular browser
-                // build serves from the systems-web webroot (Ant '*' does not
+                // build serves from the host-shell webroot (Ant '*' does not
                 // cross '/', so only webroot files match), the module-federation
                 // manifests, favicon and static assets. Mirrors the SecurityConfig
                 // FE_SHELL_PUBLIC_GET_PATHS floor (GET-only, fe tier only) so the
