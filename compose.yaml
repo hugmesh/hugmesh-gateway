@@ -1,10 +1,11 @@
 # Local dev stack for the gateway. Brings up:
 #   • Cassandra      — backs the revocation list + URL registry.
 #   • Casdoor + pg   — issues the JWTs the gateway validates.
-#   • hugmesh-games-gateway — the gateway itself, identity defaulted
-#     to hugmesh-games-gateway; flip SPRING_APPLICATION_NAME to
-#     hugmesh-id-gateway / hugmesh-systems-gateway to validate
-#     the multi-instance design without rebuilding the image.
+#   • hugmesh-be-gateway — the gateway itself, identity defaulted
+#     to hugmesh-be-gateway (the image's own application.yml default);
+#     flip SPRING_APPLICATION_NAME to hugmesh-pki-gateway /
+#     hugmesh-fe-gateway — or a per-brand ${BRAND}-{pki,be,fe}-gateway —
+#     to validate the multi-instance design without rebuilding the image.
 #
 # Composition matches the hugmesh.games BFF stack (same Cassandra
 # image + version + healthcheck shape) so the gateway can sit in
@@ -78,7 +79,7 @@ services:
         " && echo '✓ hugmesh_gateway keyspace ready'
     restart: "no"
 
-  hugmesh-games-gateway:
+  hugmesh-be-gateway:
     image: hugmesh-systems/gateway:dev
     build:
       context: .
@@ -90,7 +91,7 @@ services:
       cassandra-init:
         condition: service_completed_successfully
     environment:
-      SPRING_APPLICATION_NAME: hugmesh-games-gateway
+      SPRING_APPLICATION_NAME: hugmesh-be-gateway
       CASSANDRA_CONTACT_POINTS: cassandra:9042
       CASSANDRA_KEYSPACE: hugmesh_gateway
       CASSANDRA_LOCAL_DC: dc1
