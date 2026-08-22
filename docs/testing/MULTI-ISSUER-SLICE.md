@@ -6,17 +6,17 @@ property that matters most: an **unknown issuer fails CLOSED (401)** and a token
 one brand can **never authenticate as another**.
 
 It was built first in `hugmesh-gateway`. Replicate it verbatim across the
-other [HugMesh](https://github.com/hugmesh-net) resource-server repos:
+other [HugMesh](https://github.com/hugmesh) resource-server repos:
 
-> [`hugmesh-actions`](https://github.com/hugmesh-net/hugmesh-actions),
-> [`hugmesh-admin-bff`](https://github.com/hugmesh-net/hugmesh-admin-bff),
-> [`hugmesh-mod-bff`](https://github.com/hugmesh-net/hugmesh-mod-bff),
-> [`hugmesh-forum-bff`](https://github.com/hugmesh-net/hugmesh-forum-bff),
-> [`hugmesh-wiki-bff`](https://github.com/hugmesh-net/hugmesh-wiki-bff),
-> [`hugmesh-owncast-bff`](https://github.com/hugmesh-net/hugmesh-owncast-bff),
-> [`hugmesh-tube-bff`](https://github.com/hugmesh-net/hugmesh-tube-bff),
-> [`hugmesh-user-bff`](https://github.com/hugmesh-net/hugmesh-user-bff),
-> [`hugmesh-federation-api`](https://github.com/hugmesh-net/hugmesh-federation-api).
+> [`hugmesh-actions`](https://github.com/hugmesh/hugmesh-actions),
+> [`hugmesh-admin-bff`](https://github.com/hugmesh/hugmesh-admin-bff),
+> [`hugmesh-mod-bff`](https://github.com/hugmesh/hugmesh-mod-bff),
+> [`hugmesh-forum-bff`](https://github.com/hugmesh/hugmesh-forum-bff),
+> [`hugmesh-wiki-bff`](https://github.com/hugmesh/hugmesh-wiki-bff),
+> [`hugmesh-owncast-bff`](https://github.com/hugmesh/hugmesh-owncast-bff),
+> [`hugmesh-tube-bff`](https://github.com/hugmesh/hugmesh-tube-bff),
+> [`hugmesh-user-bff`](https://github.com/hugmesh/hugmesh-user-bff),
+> [`hugmesh-federation-api`](https://github.com/hugmesh/hugmesh-federation-api).
 
 The whole point is **determinism with no network and no live Casdoor**: each brand's
 JWKS + OIDC discovery doc is served by a tiny in-process HTTP server bound to
