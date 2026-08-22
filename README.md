@@ -1,6 +1,6 @@
 # hugmesh-gateway
 
-Spring Cloud Gateway (WebFlux) for [HugMesh](https://github.com/hugmesh-net) — the
+Spring Cloud Gateway (WebFlux) for [HugMesh](https://github.com/hugmesh) — the
 platform's public front door. **One image, many roles**: the same artifact runs as
 the PKI/identity gateway, the backend (BFF/API) gateway, or the front-end (UI)
 gateway, differentiated only by `SPRING_APPLICATION_NAME` (e.g. `hugmesh-pki-gateway`,
@@ -12,20 +12,20 @@ grant) and validated here.
 Spring Boot 4.0.7 / Spring Cloud 2025.1.2 on Java 25, reactive throughout (WebFlux +
 reactive Cassandra + R2DBC Postgres). The gateway tracks the unified platform
 ecosystem baseline and consumes the shared
-[`hugmesh-commons`](https://github.com/hugmesh-net/hugmesh-commons) 2.1.0 artifact
+[`hugmesh-commons`](https://github.com/hugmesh/hugmesh-commons) 2.1.0 artifact
 (`net.hugmesh.commons.*` security/tenancy) as a **direct, explicitly-versioned
 dependency** — it deliberately keeps `spring-boot-starter-parent` rather than the
-BFF-focused [`hugmesh-parent`](https://github.com/hugmesh-net/hugmesh-parent) metapom,
+BFF-focused [`hugmesh-parent`](https://github.com/hugmesh/hugmesh-parent) metapom,
 and does **not** depend on
-[`hugmesh-auth-core`](https://github.com/hugmesh-net/hugmesh-auth-core) (that
+[`hugmesh-auth-core`](https://github.com/hugmesh/hugmesh-auth-core) (that
 account/session/MFA core is consumed only by the BFFs).
 
 This repo is one component of the wider HugMesh platform. Requests generally flow
 browser → gateway (this repo) → a per-role BFF/API (e.g.
-[`hugmesh-admin-bff-api`](https://github.com/hugmesh-net/hugmesh-admin-bff-api)) →
+[`hugmesh-admin-bff-api`](https://github.com/hugmesh/hugmesh-admin-bff-api)) →
 data stores and federated services; see [Where it sits](#where-it-sits) below for
 how the gateway fits into that chain, and the
-[hugmesh-net organization](https://github.com/hugmesh-net) for the rest of the
+[hugmesh organization](https://github.com/hugmesh) for the rest of the
 platform's repositories.
 
 ## Current State
@@ -427,7 +427,7 @@ job, inline `dependency-check`, had been migrated onto the centralized
 `./mvnw verify` (with JUnit reports) and `build:image` builds + pushes the
 container image. The pentest leg is the per-repo arm of the platform's OWASP
 pen-test standard: it `include:`s the centralized hidden jobs from
-[`hugmesh-generator`](https://github.com/hugmesh-net/hugmesh-generator)
+[`hugmesh-generator`](https://github.com/hugmesh/hugmesh-generator)
 (`tests/pentest/ci/pentest-stage.gitlab-ci.yml`) so there
 is one source of truth — `pentest:sca` (OWASP Dependency-Check SCA) and
 `pentest:dast` (authenticated ZAP baseline + probes/nuclei harness), both
@@ -513,7 +513,7 @@ convention: ✅ shipped = on main · 🚧 in-flight = on an open branch/PR · �
   — the cert-chain hierarchy decision behind `scripts/pki/build-chained-cert.sh`.
 - [`docs/testing/MULTI-ISSUER-SLICE.md`](docs/testing/MULTI-ISSUER-SLICE.md) —
   the reusable multi-issuer security-slice test pattern built first in this repo.
-- [hugmesh-net on GitHub](https://github.com/hugmesh-net) — the rest of the
+- [hugmesh on GitHub](https://github.com/hugmesh) — the rest of the
   HugMesh platform's repositories (BFFs/APIs, front ends, the shared
   `hugmesh-generator` tooling, and more).
 
@@ -526,7 +526,7 @@ Issues and pull requests are welcome. Before opening a PR:
   to an outside contributor.
 - Keep changes scoped to this repo's gateway concerns; cross-cutting platform changes
   (auth-core, admin-bff, generator, etc.) belong in their own repos under
-  [hugmesh-net](https://github.com/hugmesh-net).
+  [hugmesh](https://github.com/hugmesh).
 - For anything touching authentication, authorization, multi-tenancy, or the
   `bff_` session bridges, please describe the security implications in the PR
   description — these are the areas this gateway is most careful about (see
