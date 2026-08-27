@@ -16,7 +16,7 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: hugmesh-net/hugmesh-gateway
+  IMAGE_NAME: hugmesh/hugmesh-gateway
 
 jobs:
   build-and-push:
