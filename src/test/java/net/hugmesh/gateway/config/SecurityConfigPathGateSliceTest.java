@@ -128,7 +128,12 @@ class SecurityConfigPathGateSliceTest extends SecuritySliceSupport {
                 "/bff/public/announcements/login",
                 "/bff/public/appeal-contact",
                 "/bff/public/theme",
-                "/bff/public/theme.css")) {
+                "/bff/public/theme.css",
+                // The anonymous forgot-password legs. They run with NO session by
+                // definition, so a 401 here makes a correctly-routed reset
+                // unreachable no matter what the route table says.
+                "/bff/password-reset/request",
+                "/bff/password-reset/confirm")) {
             client.get().uri(path).exchange()
                     .expectStatus().value(s -> assertNot401Nor403(path, s));
         }
@@ -182,6 +187,7 @@ class SecurityConfigPathGateSliceTest extends SecuritySliceSupport {
                 "/api/reports/q3",
                 "/api/auth/token", "/api/registration/start", "/api/login/options",
                 "/bff/public/announcements/login", "/bff/public/appeal-contact",
+                "/bff/password-reset/request", "/bff/password-reset/confirm",
                 "/_matrix/client/versions", "/api/v1/timelines/public",
                 "/.well-known/matrix/client",
         })
