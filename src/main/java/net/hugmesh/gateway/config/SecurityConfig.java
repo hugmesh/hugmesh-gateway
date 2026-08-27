@@ -195,6 +195,29 @@ public class SecurityConfig {
             // path (NOT /bff/login/**), mirroring the announcements/appeal-contact
             // precedent above (the earlier /bff/auth/callback allowance this used
             // to mirror was retired with the browser-PKCE redirect model — #80).
+            // ANONYMOUS PASSWORD RESET. user-bff permitAll's exactly
+            // /bff/password-reset/request and /bff/password-reset/confirm — the
+            // forgot-password legs, which by definition run with NO session. The
+            // fe-gateway now routes both to user-bff by exact path, but this coarse
+            // anyExchange().authenticated() floor 401s the anonymous visitor before
+            // the route ever runs and before the route-access PUBLIC rule
+            // (CanonicalSeed.fe()) is consulted — the same shape as the announcements,
+            // appeal-contact and theme entries above, and the reason each of them is
+            // here. Without this, a correctly-routed reset is still unreachable.
+            //
+            // EXACT PATHS, not /bff/password-reset/**: this mirrors user-bff's own
+            // SecurityConfig, which permits the two by exact path so that a future
+            // sibling under this prefix has to be opened deliberately rather than
+            // inheriting anonymous access. This is a credential-WRITING surface; the
+            // subtree form would be the wrong default here more than anywhere else.
+            //
+            // Opening the FLOOR is not the same as turning the feature on. user-bff
+            // answers 503 while casdoor.password-reset.enabled is false (its default),
+            // so the effect of this entry on a mesh that has not enabled reset is that
+            // the anonymous caller reaches the owning service and is told, truthfully,
+            // that it is not enabled — instead of a 401 that implies the wrong thing.
+            "/bff/password-reset/request",
+            "/bff/password-reset/confirm",
             "/bff/login",
     };
 
