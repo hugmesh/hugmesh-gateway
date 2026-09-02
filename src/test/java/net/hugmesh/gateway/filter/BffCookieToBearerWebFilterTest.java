@@ -70,14 +70,43 @@ class BffCookieToBearerWebFilterTest {
 
     private final BffCookieToBearerWebFilter filter = new BffCookieToBearerWebFilter();
 
+    /**
+     * The cookie name the BROWSER actually sends — the wire contract, spelled out as a
+     * literal here ON PURPOSE.
+     *
+     * <p>Every fixture below used to build its cookie from
+     * {@code BffCookieToBearerWebFilter.SESSION_COOKIE}, i.e. from the class under test.
+     * That made the suite self-referential on the one value that has to agree with
+     * something OUTSIDE this class (the {@code bff_session} cookie admin-bff mints and the
+     * browser replays): renaming the production constant renamed it in the fixtures too,
+     * so the whole file stayed green while cookie-mode SSO was dead in production —
+     * measured, mutation {@code SESSION_COOKIE = "session"} left 9/9 passing. Pinning the
+     * literal here is what turns that mutation red.
+     */
+    private static final String WIRE_SESSION_COOKIE = "bff_session";
+
     /** A GET carrying the given Authorization header (null ⇒ none) and bff_session cookie (null ⇒ none). */
     private static MockServerWebExchange exchange(String authorization, String sessionCookie) {
         MockServerHttpRequest.BaseBuilder<?> b = MockServerHttpRequest.get("/api/thing");
         if (authorization != null) b.header(HttpHeaders.AUTHORIZATION, authorization);
         if (sessionCookie != null) {
-            b.cookie(new HttpCookie(BffCookieToBearerWebFilter.SESSION_COOKIE, sessionCookie));
+            b.cookie(new HttpCookie(WIRE_SESSION_COOKIE, sessionCookie));
         }
         return MockServerWebExchange.from(b.build());
+    }
+
+    // ── (0) THE WIRE NAME: the one value that must agree outside this class ──────
+
+    @Test
+    void sessionCookieName_isTheWireLiteral_andMatchesTheSiblingSessionFilter() {
+        // Two independent anchors, because a rename that misses either breaks a different
+        // surface: the literal is what the browser sends (admin-bff mints `bff_session`),
+        // and BffSessionAuthFilter reads the SAME cookie on the introspection path — the
+        // javadoc claims this filter "mirrors" it, so the claim is asserted, not trusted.
+        assertThat(BffCookieToBearerWebFilter.SESSION_COOKIE).isEqualTo(WIRE_SESSION_COOKIE);
+        assertThat(BffCookieToBearerWebFilter.SESSION_COOKIE)
+                .as("the cookie-mode bridge and the introspection filter must read one cookie")
+                .isEqualTo(BffSessionAuthFilter.SESSION_COOKIE);
     }
 
     // ── (i) HEADER WINS: a client-sent credential is never overwritten ───────────
@@ -182,13 +211,13 @@ class BffCookieToBearerWebFilterTest {
 
         assertThat(chain.forwardedCookieHeader())
                 .as("bff_session must survive the bridge for the cookie-terminated BFF surfaces")
-                .contains(BffCookieToBearerWebFilter.SESSION_COOKIE + "=bff_opaque-session-abc");
+                .contains(WIRE_SESSION_COOKIE + "=bff_opaque-session-abc");
     }
 
     @Test
     void cookieOnly_leavesUnrelatedCookiesAlone() {
         var req = MockServerHttpRequest.get("/api/thing")
-                .cookie(new HttpCookie(BffCookieToBearerWebFilter.SESSION_COOKIE, "bff_opaque-session-abc"),
+                .cookie(new HttpCookie(WIRE_SESSION_COOKIE, "bff_opaque-session-abc"),
                         new HttpCookie("XSRF-TOKEN", "csrf-value"))
                 .build();
         var chain = new RecordingChain();
@@ -197,7 +226,7 @@ class BffCookieToBearerWebFilterTest {
 
         assertThat(chain.forwardedAuth()).isEqualTo("Bearer bff_opaque-session-abc");
         assertThat(chain.forwardedCookieHeader())
-                .contains(BffCookieToBearerWebFilter.SESSION_COOKIE + "=bff_opaque-session-abc")
+                .contains(WIRE_SESSION_COOKIE + "=bff_opaque-session-abc")
                 .contains("XSRF-TOKEN=csrf-value");
     }
 
@@ -208,7 +237,8 @@ class BffCookieToBearerWebFilterTest {
         // The whole bridge is inert if it runs after the swap: the exchange filter would
         // see no Authorization header and forward a cookie-only request unauthenticated.
         var exchangeFilter = new BffJwtExchangeWebFilter(WebClient.builder().build(),
-                "X-Internal-Token", "secret-internal-token", 5_000L, 10_000, 3_000L);
+                "X-Internal-Token", "secret-internal-token", 5_000L,
+                BffJwtExchangeWebFilter.DEFAULT_CACHE_TTL_CEILING_MS, 10_000, 3_000L);
 
         assertThat(filter.getOrder()).isEqualTo(Ordered.HIGHEST_PRECEDENCE + 4);
         assertThat(filter.getOrder())

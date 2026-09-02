@@ -224,11 +224,23 @@ hugmesh:
       # Positive-swap cache TTL — failed swaps are NEVER cached. THE TTL IS THE
       # SUSPENSION-BYPASS WINDOW: a cache hit skips admin-bff's exchange suspension gate,
       # so a session suspended after its swap was cached keeps authorizing until the entry
-      # expires. Default 5s (matched to revocation refresh-interval-ms above), clamped to a
-      # 60s ceiling in code. Set to 0 to DISABLE the cache entirely (every request
-      # re-consults the gate ⇒ ZERO bypass window, at one in-cluster swap per request) —
+      # expires. Default 5s (matched to revocation refresh-interval-ms above), clamped to
+      # cache-ttl-max-ms below. Set to 0 to DISABLE the cache entirely (every request
+      # re-consults the gate => ZERO bypass window, at one in-cluster swap per request) —
       # recommended where revocation is not wired (RevocationGatewayFilter inert).
       cache-ttl-ms: ${HUGMESH_GATEWAY_BFF_EXCHANGE_CACHE_TTL_MS:5000}
+      # CEILING on the above — the widest suspension-staleness window this deployment
+      # tolerates. Effective TTL = min(cache-ttl-ms, cache-ttl-max-ms). Was an
+      # unconfigurable 60_000 literal in the clamp expression; a deployment that wants a
+      # tighter guaranteed bound sets this instead of trusting every chart/env override of
+      # cache-ttl-ms. A clamp that actually fires WARNs at startup with both values, and
+      # raising this above the 60000 default WARNs that the bypass window was widened. A
+      # non-positive value disables the cache (a maximum lifetime of zero admits no entry).
+      cache-ttl-max-ms: ${HUGMESH_GATEWAY_BFF_EXCHANGE_CACHE_TTL_MAX_MS:60000}
+      # Entry-count bound on the positive-swap cache (floored at 1). At capacity the filter
+      # drops TTL-elapsed entries first and otherwise declines to cache the new swap — it
+      # still forwards, so the bound sheds cache, never authorization.
+      cache-max-size: ${HUGMESH_GATEWAY_BFF_EXCHANGE_CACHE_MAX_SIZE:10000}
   tls:
     key-store: ${HUGMESH_TLS_KEY_STORE:/stores/keystore.p12}
     key-store-type: ${HUGMESH_TLS_KEY_STORE_TYPE:PKCS12}
