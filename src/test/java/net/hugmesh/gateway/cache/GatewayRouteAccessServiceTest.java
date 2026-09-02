@@ -311,12 +311,104 @@ class GatewayRouteAccessServiceTest {
         assertThat(seed)
             .as("/v1/synthesize/** must not carry any non-ROLE_USER rule")
             .noneMatch(r -> "/v1/synthesize/**".equals(r.urlPattern()) && !"ROLE_USER".equals(r.role()));
-        // The row is SCOPED to the synthesize sub-path: it must not widen the
-        // baked floor over the rest of the /v1 inference space (the edge-ai
-        // `/v1/**` + edge-ai-analysis `/v1/analyze/**` rows are carried only by
-        // the Postgres seed), so a sibling /v1 path stays NO_RULE here.
-        assertThat(s.decide("/v1/chat/completions", "default", List.of(), List.of()))
-            .isEqualTo(Decision.NO_RULE);
+        // The row stays SCOPED to the synthesize sub-path — it must not be the row
+        // that governs the rest of the /v1 space. That space is now governed by its
+        // OWN rows (see canonicalSeed_beGateway_edgeAiV1SpaceIsFullyGoverned); what
+        // matters here is that no /v1/synthesize/** rule leaks onto a sibling path.
+        assertThat(seed)
+            .as("no /v1/synthesize rule may match a sibling /v1 path")
+            .noneMatch(r -> r.urlPattern() != null
+                    && r.urlPattern().startsWith("/v1/synthesize")
+                    && new org.springframework.util.AntPathMatcher()
+                            .match(r.urlPattern(), "/v1/chat/completions"));
+    }
+
+    @Test
+    void canonicalSeed_beGateway_edgeAiV1SpaceIsFullyGoverned() {
+        // DUAL-WRITE PARITY (issue #4 follow-on). The cluster Postgres seed
+        // (specs/cluster/manifests/route-access/initdb/20-schema.sql) carries THREE
+        // be-gateway /v1 rows — /v1/analyze/**, /v1/synthesize/** and the /v1/**
+        // base — and the gateway's baked CanonicalSeed carried only the synthesize
+        // one. The be-gateway's `edge-ai` route is a Host-predicate CATCHALL with NO
+        // Path predicate, so on the datastore-unreachable fallback EVERY other /v1
+        // path (/v1/chat/completions, /v1/embeddings, /v1/models) decided NO_RULE —
+        // and NO_RULE FORWARDS. The model API was ungoverned by this layer.
+        //
+        // POSTURE THE NEW ROWS CREATE: /v1/** and /v1/analyze/** each become a
+        // ROLE_USER capability FLOOR. Anonymous is DENIED (governed-but-ungranted,
+        // not NO_RULE); a principal authenticated but WITHOUT ROLE_USER (a
+        // ROLE_MATRIX-only account) is DENIED where it previously forwarded; a plain
+        // ROLE_USER is ALLOWED. Strictly closing — nothing that was reachable to a
+        // ROLE_USER stops being reachable.
+        var seed = CanonicalSeed.forGateway("hugmesh-be-gateway");
+        var s = new GatewayRouteAccessService(null, null, "hugmesh-be-gateway", true, false, null);
+        s.primeForTest(seed);
+
+        // Every /v1 surface the be-gateway fronts RESOLVES to a rule (never NO_RULE)
+        // and is access-controlled to the ROLE_USER floor.
+        List<String> v1Paths = List.of(
+                "/v1",                          // the catchall root itself
+                "/v1/chat/completions",         // edge-ai (Ollama model API)
+                "/v1/embeddings",
+                "/v1/models",
+                "/v1/analyze/image/classify",   // edge-ai-analysis
+                "/v1/analyze/content/moderate",
+                "/v1/synthesize",               // edge-ai-tts
+                "/v1/synthesize/stream");
+        for (String path : v1Paths) {
+            assertThat(s.decide(path, "default", List.of(), List.of()))
+                .as("anonymous must be DENIED at %s (governed, not NO_RULE)", path)
+                .isEqualTo(Decision.DENY);
+            assertThat(s.decide(path, "default", List.of("u1"), List.of("ROLE_MATRIX")))
+                .as("an authenticated non-ROLE_USER principal must be DENIED at %s", path)
+                .isEqualTo(Decision.DENY);
+            assertThat(s.decide(path, "default", List.of("u1"), List.of("ROLE_USER")))
+                .as("a plain ROLE_USER must reach %s", path)
+                .isEqualTo(Decision.ALLOW);
+        }
+
+        // Congruence guard: each of the three patterns is present exactly as a
+        // ROLE_USER ALLOW row, and carries NO other role (no ROLE_ADMIN pairing on a
+        // capability floor — admins reach it via the cross-domain bypass).
+        for (String pattern : List.of("/v1/**", "/v1/analyze/**", "/v1/synthesize/**")) {
+            assertThat(seed)
+                .as("%s must be a ROLE_USER allow row in the be seed", pattern)
+                .anyMatch(r -> pattern.equals(r.urlPattern())
+                        && "ROLE_USER".equals(r.role()) && r.allow());
+            assertThat(seed)
+                .as("%s must not carry any non-ROLE_USER rule", pattern)
+                .noneMatch(r -> pattern.equals(r.urlPattern()) && !"ROLE_USER".equals(r.role()));
+        }
+
+        // MOST-SPECIFIC-WINS RESOLUTION PROOF. Flip ONLY the /v1/** base row of the
+        // real seed to an explicit deny and re-prime: the two sub-path rows must
+        // still decide their own paths (ALLOW), while the base path now denies. If
+        // the base row were shadowing the sub-paths — i.e. if the sub-paths did not
+        // resolve to their own rules — /v1/analyze and /v1/synthesize would flip too.
+        var flipped = new java.util.ArrayList<GatewayRouteAccessService.Rule>();
+        for (var r : seed) {
+            if ("/v1/**".equals(r.urlPattern())) {
+                flipped.add(new GatewayRouteAccessService.Rule(r.id() + ":flipped", r.gateway(),
+                        r.urlPattern(), r.role(), r.casdoorUser(), false, r.domain(), r.mfaRequired()));
+            } else {
+                flipped.add(r);
+            }
+        }
+        var flippedService =
+                new GatewayRouteAccessService(null, null, "hugmesh-be-gateway", true, false, null);
+        flippedService.primeForTest(flipped);
+        assertThat(flippedService.decide("/v1/chat/completions", "default",
+                List.of("u1"), List.of("ROLE_USER")))
+            .as("the flipped /v1/** base row must govern a bare /v1 path")
+            .isEqualTo(Decision.DENY);
+        assertThat(flippedService.decide("/v1/analyze/image/classify", "default",
+                List.of("u1"), List.of("ROLE_USER")))
+            .as("/v1/analyze/** must win over /v1/** (most-specific)")
+            .isEqualTo(Decision.ALLOW);
+        assertThat(flippedService.decide("/v1/synthesize", "default",
+                List.of("u1"), List.of("ROLE_USER")))
+            .as("/v1/synthesize/** must win over /v1/** (most-specific)")
+            .isEqualTo(Decision.ALLOW);
     }
 
     @Test

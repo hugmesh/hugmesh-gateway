@@ -70,9 +70,18 @@ import java.util.Optional;
  *       coarse SecurityConfig gate (already passed) is the authority.</li>
  * </ol>
  *
- * <p>Anonymous requests forward untouched — SecurityConfig already decided
- * whether an unauthenticated path is reachable, exactly as the resource-access
- * filter does.
+ * <p>Anonymous requests forward without a route-access decision — SecurityConfig
+ * already decided whether an unauthenticated path is reachable, exactly as the
+ * resource-access filter does.
+ *
+ * <p><b>Inbound {@code X-Domain} is always stripped.</b> {@code X-Domain} is the
+ * canonical gateway-stamped brand header; on the way IN it is client-supplied and
+ * therefore untrusted, so it is removed unconditionally at the top of
+ * {@link #filter} — ahead of every short-circuit above, anonymous traffic
+ * included. No downstream consumer of the header exists yet, so nothing is stamped
+ * in its place; the strip is what makes stamping the validated {@code targetDomain}
+ * safe whenever that consumer lands. Same posture {@code ExternalAuthHeaderFilter}
+ * holds for the {@code External-*} trio.
  */
 @Component
 public class GatewayRouteAccessFilter implements WebFilter, Ordered {
@@ -124,8 +133,29 @@ public class GatewayRouteAccessFilter implements WebFilter, Ordered {
         this(routeAccess, domainRegistry, false, 600_000L);
     }
 
+    /**
+     * The canonical gateway-stamped brand header. The gateway is (or will be) the
+     * SOLE authority on its value — see {@link #stripClientDomainHeader} and the
+     * forwarding TODO further down.
+     */
+    static final String X_DOMAIN = "X-Domain";
+
     @Override
-    public Mono<Void> filter(ServerWebExchange exchange, WebFilterChain chain) {
+    public Mono<Void> filter(ServerWebExchange inbound, WebFilterChain chain) {
+        // TRUST BOUNDARY, applied UNCONDITIONALLY and FIRST — before the anonymous
+        // fast-path, before the SUPERADMIN cross-domain bypass, before the
+        // ADMIN/GAME-MASTER own-domain bypass, before decide(). `X-Domain` is a
+        // CLIENT-SUPPLIED request header on the way in: anyone who can reach the
+        // gateway can set it. Every one of the branches below reaches
+        // `chain.filter(exchange)` on its own, so stripping anywhere further down
+        // would leave whole classes of request (anonymous traffic and every
+        // privileged bypass) forwarding an attacker's value verbatim. Stripping
+        // here means a downstream can NEVER receive a client-forged X-Domain,
+        // which is the precondition for the gateway stamping a validated one
+        // later (see the TODO below) — same trust posture ExternalAuthHeaderFilter
+        // holds for the External-* trio, established BEFORE any consumer exists so
+        // the forwarding half can never land on a spoofable header.
+        final ServerWebExchange exchange = stripClientDomainHeader(inbound);
         String path = exchange.getRequest().getPath().value();
         // Wrap the principal in Optional + defaultIfEmpty so the stream emits
         // exactly one element: a present auth, or an explicit "absent". A bare
@@ -345,23 +375,54 @@ public class GatewayRouteAccessFilter implements WebFilter, Ordered {
                 if (routeAccess.decide(path, targetDomain, userIds, authorities) == Decision.DENY) {
                     return reject(exchange, path);
                 }
-                // TODO: targetDomain is resolved here but never forwarded downstream.
-                // Public-read domain partitioning (a downstream service scoping
-                // anonymous/public reads to the requesting brand) needs an `X-Domain`
-                // header carrying this validated value, mirroring how
-                // ExternalAuthHeaderFilter forwards External-Authorization/External-Auth-Provider/External-Auth-Id.
-                // Not added speculatively here — no downstream consumer exists yet
-                // (the only X-Domain-ish header in the org is games' X-Domain-Denied
-                // RESPONSE header, and games' DomainGuardFilter scopes off the JWT's
-                // DOMAIN_ authority, not a forwarded request header).
-                // ⚠ Whoever implements this MUST strip any CLIENT-supplied X-Domain
-                // first — unconditionally, on every path, exactly as
-                // ExternalAuthHeaderFilter.stripInbound does for the External-* trio —
-                // or the header becomes a brand-spoof injection vector: a caller could
-                // forge X-Domain and read another brand's public partition through a
+                // TODO (forwarding half only): targetDomain is resolved here but
+                // still not forwarded downstream. Public-read domain partitioning (a
+                // downstream service scoping anonymous/public reads to the requesting
+                // brand) needs an `X-Domain` header carrying this validated value,
+                // mirroring how ExternalAuthHeaderFilter forwards
+                // External-Authorization/External-Auth-Provider/External-Auth-Id.
+                // Still not added speculatively: an org-wide grep finds NO consumer of
+                // an inbound X-Domain REQUEST header — the only X-Domain-ish header in
+                // the org is games' X-Domain-Denied RESPONSE header, and games'
+                // DomainGuardFilter scopes off the JWT's DOMAIN_ authority, not a
+                // forwarded request header. Emitting it now would ship dark.
+                // The STRIP half of this TODO IS implemented — see
+                // stripClientDomainHeader, called unconditionally at the very top of
+                // filter(). That is the half that carries the security value and is
+                // the half that must land FIRST: it means no request can already be
+                // carrying a forged X-Domain when the forwarding half is added, so
+                // the stamped value can never be an attacker's. Whoever adds the
+                // forward MUST keep that strip in place and stamp only the validated
+                // `targetDomain` computed above (never the inbound header), or the
+                // header becomes a brand-spoof injection vector: a caller could forge
+                // X-Domain and read another brand's public partition through a
                 // downstream that trusts the gateway to have validated it.
                 return chain.filter(exchange);
             });
+    }
+
+    /**
+     * Drop any CLIENT-supplied {@code X-Domain} request header so it can never reach
+     * a downstream that would otherwise trust it as the gateway's validated brand.
+     *
+     * <p>Mirrors {@code ExternalAuthHeaderFilter.stripInbound}: the gateway is the
+     * sole authority on this header's value, so the inbound copy is dropped
+     * unconditionally, on EVERY path and for every principal (anonymous included),
+     * regardless of whether the gateway currently stamps a replacement. Returns the
+     * exchange UNCHANGED when the header is absent, so the overwhelmingly common
+     * case allocates no mutated exchange and the filter stays byte-identical to its
+     * previous behaviour for it.
+     */
+    private static ServerWebExchange stripClientDomainHeader(ServerWebExchange exchange) {
+        // get(), not getFirst(): presence is the question, not the value. getFirst
+        // answers null for BOTH "absent" and "present with an empty value list", so
+        // it would leave that second case forwarded; get() only answers null when
+        // the header name is genuinely absent. Case-insensitivity comes from
+        // HttpHeaders itself, so `x-domain:` is caught by the same lookup.
+        if (exchange.getRequest().getHeaders().get(X_DOMAIN) == null) return exchange;
+        return exchange.mutate()
+                .request(b -> b.headers(h -> h.remove(X_DOMAIN)))
+                .build();
     }
 
     private static void addIfPresent(List<String> list, String value) {
