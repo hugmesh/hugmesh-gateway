@@ -255,7 +255,33 @@ final class CanonicalSeed {
                 // it ungoverned. When the slug is deselected gate_optional_services
                 // prunes the Postgres row + the route; this floor stays closed-by-
                 // default either way.
-                r(BE, "/v1/synthesize/**",      "ROLE_USER"));
+                r(BE, "/v1/synthesize/**",      "ROLE_USER"),
+                // ── edge-ai-analysis verdict API (OPTIONAL slug `edge-ai-analysis`)
+                // The analysis wrapper (image NSFW/abuse classify, perceptual hash,
+                // content moderate, log summarize) on the SAME /v1 space, be-gateway
+                // route `edge-ai-analysis`. Same single ROLE_USER floor, same
+                // reasoning as the tts row above; MORE SPECIFIC than the /v1/** base
+                // below so it wins the longest-pattern match.
+                r(BE, "/v1/analyze/**",         "ROLE_USER"),
+                // ── edge-ai inference API (OPTIONAL slug `edge-ai`) ──────────────
+                // The OpenAI-compatible model API (Ollama on the GPU/edge_ai node),
+                // fronted by the be-gateway's `edge-ai` route — which carries a Host
+                // predicate and NO Path predicate, i.e. it is the ai.<domain>
+                // CATCHALL. Without this row every /v1 path OTHER than the two
+                // sub-paths above (e.g. /v1/chat/completions, /v1/embeddings,
+                // /v1/models) decided NO_RULE on the datastore-unreachable fallback,
+                // and NO_RULE FORWARDS — the model API was UNGOVERNED by this layer,
+                // gated only by the coarse authenticated() floor, so a principal
+                // holding no ROLE_USER at all (a ROLE_MATRIX-only account, say)
+                // reached it. This is the third of the three /v1 rows the cluster
+                // Postgres seed already carries; the gateway's baked copy had only
+                // the synthesize one (dual-write seed drift, recorded on issue #4).
+                // ⚠ It is deliberately the BASE row, not a widening of the two above:
+                // longest-pattern-match keeps /v1/analyze/** and /v1/synthesize/**
+                // resolving to their own rows. When the edge-ai slug is deselected
+                // gate_optional_services drops the Postgres row + the route; this
+                // floor stays closed-by-default either way.
+                r(BE, "/v1/**",                 "ROLE_USER"));
     }
 
     private static List<Rule> fe() {

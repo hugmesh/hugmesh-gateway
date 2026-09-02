@@ -971,6 +971,156 @@ class GatewayRouteAccessFilterTest {
         assertThat(downstreamCalled).as("floor flag off -> legacy admin bypass, no MFA gate").isTrue();
     }
 
+    // ── Inbound X-Domain strip (issue #4, TODO 2 — the half that can land) ───
+    //
+    // X-Domain is the canonical gateway-stamped brand header. INBOUND it is
+    // client-supplied and therefore untrusted; the filter drops it
+    // UNCONDITIONALLY at the top of filter(), before every short-circuit, so no
+    // downstream can ever receive a caller-forged value. The gateway does not yet
+    // stamp a replacement (no consumer exists), which these tests also pin: the
+    // forwarded request must carry NO X-Domain at all.
+
+    /** Runs the filter with a capturing chain and returns the exchange the
+     *  downstream actually received (NOT the one handed in — the filter forwards a
+     *  mutated exchange when it strips a header). */
+    private org.springframework.web.server.ServerWebExchange runCapturingForwarded(
+            String path, String domainHeaderName, String domainHeaderValue,
+            AbstractAuthenticationToken auth) {
+        var builder = MockServerHttpRequest.get(path);
+        if (domainHeaderName != null) builder.header(domainHeaderName, domainHeaderValue);
+        MockServerWebExchange mwex = MockServerWebExchange.from(builder.build());
+        var seen = new java.util.concurrent.atomic.AtomicReference<
+                org.springframework.web.server.ServerWebExchange>();
+        WebFilterChain capturing = ex -> { seen.set(ex); return Mono.empty(); };
+        if (auth == null) {
+            filter.filter(mwex, capturing).block();
+        } else {
+            filter.filter(new ExchangeWithPrincipal(mwex, auth), capturing).block();
+        }
+        return seen.get();
+    }
+
+    @Test
+    void inboundXDomain_strippedOnAnonymousRequest() {
+        // The anonymous branch returns chain.filter() FIRST, before any decision —
+        // so a strip placed anywhere further down would miss it entirely.
+        var forwardedExchange = runCapturingForwarded("/api/login", "X-Domain", "brandy", null);
+        assertThat(forwardedExchange).as("anonymous request must still forward").isNotNull();
+        assertThat(forwardedExchange.getRequest().getHeaders().get("X-Domain"))
+            .as("a client-supplied X-Domain must never reach a downstream")
+            .isNull();
+    }
+
+    @Test
+    void inboundXDomain_strippedOnAdminBypass() {
+        // The ADMIN/GAME-MASTER own-domain bypass also short-circuits before
+        // decide(); a forged X-Domain must not ride it downstream either.
+        Jwt adminJwt = jwt("admin-1", List.of(Map.of("name", "admin")));
+        var forwardedExchange = runCapturingForwarded(
+                "/api/anything", "X-Domain", "brandy", authFor(adminJwt, "ADMIN"));
+        assertThat(forwardedExchange.getRequest().getHeaders().get("X-Domain")).isNull();
+        Mockito.verify(routeAccess, Mockito.never()).decide(any(), any(), any(), any());
+    }
+
+    @Test
+    void inboundXDomain_strippedOnSuperadminCrossDomainBypass() {
+        // SUPERADMIN is the ONLY cross-domain bypass and short-circuits earliest of
+        // all — the highest-value forgery target, since it is the one principal that
+        // legitimately crosses brands.
+        Jwt saJwt = jwt("sa-1", List.of(Map.of("name", "superadmin")));
+        var forwardedExchange = runCapturingForwarded(
+                "/api/admin/secrets", "X-Domain", "brandy", authFor(saJwt, "SUPERADMIN"));
+        assertThat(forwardedExchange.getRequest().getHeaders().get("X-Domain")).isNull();
+    }
+
+    @Test
+    void inboundXDomain_strippedOnAllowDecision() {
+        // The ordinary ALLOW fall-through (the only path that reaches decide()).
+        when(routeAccess.decide(any(), any(), any(), any())).thenReturn(Decision.ALLOW);
+        Jwt userJwt = jwt("user-1", List.of(Map.of("name", "user")));
+        var forwardedExchange = runCapturingForwarded(
+                "/api/reports/q3", "X-Domain", "brandy", authFor(userJwt));
+        assertThat(forwardedExchange.getRequest().getHeaders().get("X-Domain")).isNull();
+    }
+
+    @Test
+    void inboundXDomain_strippedOnNoRuleForward() {
+        // NO_RULE FORWARDS — an ungoverned path is precisely where a forged header
+        // would otherwise sail straight through.
+        when(routeAccess.decide(any(), any(), any(), any())).thenReturn(Decision.NO_RULE);
+        Jwt userJwt = jwt("user-1", List.of(Map.of("name", "user")));
+        var forwardedExchange = runCapturingForwarded(
+                "/api/public/health", "X-Domain", "brandy", authFor(userJwt));
+        assertThat(forwardedExchange.getRequest().getHeaders().get("X-Domain")).isNull();
+    }
+
+    @Test
+    void inboundXDomain_strippedRegardlessOfHeaderCase() {
+        // HTTP header names are case-insensitive; a strip that matched only the
+        // canonical spelling would be trivially bypassed with `x-domain:`.
+        when(routeAccess.decide(any(), any(), any(), any())).thenReturn(Decision.ALLOW);
+        Jwt userJwt = jwt("user-1", List.of(Map.of("name", "user")));
+        var forwardedExchange = runCapturingForwarded(
+                "/api/reports/q3", "x-domain", "brandy", authFor(userJwt));
+        assertThat(forwardedExchange.getRequest().getHeaders().get("X-Domain")).isNull();
+        assertThat(forwardedExchange.getRequest().getHeaders().get("x-domain")).isNull();
+    }
+
+    @Test
+    void inboundXDomain_emptyValuedHeaderAlsoStripped() {
+        // A present-but-blank header is still a client-supplied header; leaving it
+        // would let a caller assert "no brand" to a downstream that distinguishes
+        // absent from empty.
+        when(routeAccess.decide(any(), any(), any(), any())).thenReturn(Decision.ALLOW);
+        Jwt userJwt = jwt("user-1", List.of(Map.of("name", "user")));
+        var forwardedExchange = runCapturingForwarded(
+                "/api/reports/q3", "X-Domain", "", authFor(userJwt));
+        assertThat(forwardedExchange.getRequest().getHeaders().get("X-Domain")).isNull();
+    }
+
+    @Test
+    void noInboundXDomain_exchangeForwardedUnmutated_andGatewayStampsNothingYet() {
+        // Two contracts in one: (a) the common case allocates no mutated exchange —
+        // the SAME exchange instance is forwarded, so the filter is byte-identical to
+        // its previous behaviour for a request without the header; and (b) the
+        // gateway does NOT stamp an X-Domain of its own. The forwarding half of the
+        // TODO is deliberately unimplemented (no downstream consumer exists), so an
+        // accidental early stamp — shipping the header dark — fails here.
+        when(routeAccess.decide(any(), any(), any(), any())).thenReturn(Decision.ALLOW);
+        Jwt userJwt = jwt("user-1", List.of(Map.of("name", "user")));
+        var builder = MockServerHttpRequest.get("/api/reports/q3");
+        MockServerWebExchange mwex = MockServerWebExchange.from(builder.build());
+        var handedIn = new ExchangeWithPrincipal(mwex, authFor(userJwt));
+        var seen = new java.util.concurrent.atomic.AtomicReference<
+                org.springframework.web.server.ServerWebExchange>();
+        WebFilterChain capturing = ex -> { seen.set(ex); return Mono.empty(); };
+        filter.filter(handedIn, capturing).block();
+        assertThat(seen.get())
+            .as("no header present -> forward the very same exchange, no mutation")
+            .isSameAs(handedIn);
+        assertThat(seen.get().getRequest().getHeaders().get("X-Domain"))
+            .as("the gateway must not stamp X-Domain until a consumer exists")
+            .isNull();
+    }
+
+    @Test
+    void inboundXDomain_deniedRequestStillNeverForwards() {
+        // Belt-and-braces: on DENY nothing is forwarded at all, and the 403 contract
+        // (status + X-Route-Denied) is unchanged by the strip.
+        when(routeAccess.decide(any(), any(), any(), any())).thenReturn(Decision.DENY);
+        Jwt userJwt = jwt("user-1", List.of(Map.of("name", "user")));
+        var builder = MockServerHttpRequest.get("/api/reports/q3").header("X-Domain", "brandy");
+        MockServerWebExchange mwex = MockServerWebExchange.from(builder.build());
+        var seen = new java.util.concurrent.atomic.AtomicReference<
+                org.springframework.web.server.ServerWebExchange>();
+        WebFilterChain capturing = ex -> { seen.set(ex); return Mono.empty(); };
+        filter.filter(new ExchangeWithPrincipal(mwex, authFor(userJwt)), capturing).block();
+        assertThat(seen.get()).as("DENY must not forward").isNull();
+        assertThat(mwex.getResponse().getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
+        assertThat(mwex.getResponse().getHeaders().getFirst("X-Route-Denied"))
+            .isEqualTo("hugmesh-be-gateway:/api/reports/q3");
+    }
+
     /** Populates getPrincipal() on a MockServerWebExchange (the mock leaves it
      *  an empty Mono otherwise). Mirrors the helper in ResourceAccessFilterTest. */
     static class ExchangeWithPrincipal extends org.springframework.web.server.ServerWebExchangeDecorator {
