@@ -443,10 +443,39 @@ forward-looking, not-yet-started work in *Roadmap* below):
   window, not a full bypass** — suspension is enforced admin-bff-side on every
   non-cached exchange call, but a cache hit skips that round-trip, so a session
   suspended after its swap was cached keeps authorizing until the cache entry
-  expires (TTL default 5s, hard-clamped to 60s; `cache-ttl-ms<=0` disables the
-  cache for a zero-window posture). PR #68 bounded what was previously an
-  unclamped (effectively 60s-default) window. Documented in
-  `src/main/java/net/hugmesh/gateway/filter/BffJwtExchangeWebFilter.java`.
+  expires. The window is bounded on three axes, all configurable and all now held in
+  place by tests: `cache-ttl-ms` (default 5s) is clamped to `cache-ttl-max-ms`
+  (default 60s — the widest window this deployment tolerates), `cache-max-size`
+  (default 10000, floored at 1) bounds the entry count, and a non-positive value of
+  *either* TTL knob disables the cache outright for a zero-window posture. A clamp
+  that actually fires now WARNs at startup with the configured **and** effective
+  values (it used to apply silently, so an operator who asked for ten minutes just
+  got sixty seconds with nothing saying so), and raising the ceiling above its
+  default WARNs that the bypass window was widened.
+
+  **Why the tests matter here specifically:** the ceiling used to be an anonymous
+  `60_000L` literal inside the clamp expression, and it was measurably unguarded —
+  on that tree, deleting the clamp, widening it to 600 s, deleting the
+  `cache-max-size` check, and deleting the size floor **all left the filter's suite
+  green**. A bound nothing holds in place is a comment, not a bound. See
+  `src/main/java/net/hugmesh/gateway/filter/BffJwtExchangeWebFilter.java` and the
+  `(v-d) THE BOUND ITSELF` block of `BffJwtExchangeWebFilterTest`.
+
+  **Still open — proactive invalidation on suspension (needs a cross-repo push).**
+  The remaining half of the design question ("should a suspension event evict cached
+  entries instead of waiting out the TTL?") cannot be usefully answered inside this
+  repo: a gateway-side eviction driven off `RevocationListService` would be
+  *redundant* where revocation is wired — `RevocationGatewayFilter` already denies
+  `subject:<sub>` on **every** request including cache hits, because it reads the
+  SecurityContext populated from the swapped-in custody JWT — and *inert* where it is
+  not, since `RevocationListService.revoke()` no-ops when Cassandra is unwired and
+  `isRevoked()` answers `false` against the empty cold-start snapshot. The only lever
+  that actually closes the window in a revocation-less deployment is a **push from
+  admin-bff** (an authenticated internal call telling the gateway to drop a specific
+  cached swap), which is a new cross-repo contract and a human call, not a
+  single-repo change. Until then the honest posture statement is: TTL-bounded where
+  revocation is off, already-immediate where revocation is on, and `cache-ttl-ms=0`
+  for anyone who wants neither.
 - **Downstream mTLS's store passwords (`hugmesh.tls.*`) may never actually bind
   in-cluster — unverified against the chart.** `application-tls.properties` (the
   file the chart's `build-keystore` initContainer writes the real generated PKCS12

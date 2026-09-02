@@ -117,12 +117,18 @@ class BffJwtExchangeWebFilterTest {
     }
 
     private static BffJwtExchangeWebFilter filter(StubExchange stub, long cacheTtlMs) {
+        return filter(stub, cacheTtlMs, BffJwtExchangeWebFilter.DEFAULT_CACHE_TTL_CEILING_MS, 10_000);
+    }
+
+    /** Full-control factory: TTL, the CEILING the TTL is clamped to, and the entry bound. */
+    private static BffJwtExchangeWebFilter filter(StubExchange stub, long cacheTtlMs,
+                                                  long cacheTtlMaxMs, int cacheMaxSize) {
         WebClient client = WebClient.builder()
                 .baseUrl("http://admin-bff:8080")
                 .exchangeFunction(stub)
                 .build();
         return new BffJwtExchangeWebFilter(client, "X-Internal-Token", "secret-internal-token",
-                cacheTtlMs, 10_000, 3_000L);
+                cacheTtlMs, cacheTtlMaxMs, cacheMaxSize, 3_000L);
     }
 
     private static MockServerWebExchange exchange(String bearer) {
@@ -202,7 +208,8 @@ class BffJwtExchangeWebFilterTest {
         // Use a short request timeout so the test is fast but still exercises .timeout().
         WebClient client = WebClient.builder().baseUrl("http://admin-bff:8080").exchangeFunction(stub).build();
         var f = new BffJwtExchangeWebFilter(client, "X-Internal-Token", "secret-internal-token",
-                60_000L, 10_000, 50L /* 50ms request timeout */);
+                60_000L, BffJwtExchangeWebFilter.DEFAULT_CACHE_TTL_CEILING_MS, 10_000,
+                50L /* 50ms request timeout */);
         var ex = exchange("bff_will-time-out");
         var chain = new RecordingChain();
 
@@ -322,6 +329,143 @@ class BffJwtExchangeWebFilterTest {
         assertThat(raw)
                 .as("application.yml must default bff-exchange cache-ttl-ms to 5000ms, not the old 60000ms")
                 .isNotNull().contains(":5000}").doesNotContain("60000");
+    }
+
+    // ── (v-d) THE BOUND ITSELF — the clamp, its configurable ceiling, the entry cap ─
+    //
+    // These exist because the bound was measurably UNGUARDED: on the pre-change tree,
+    // deleting `Math.min(cacheTtlMillis, 60_000L)`, widening it to 600_000L, deleting the
+    // cache-max-size check in putCached, and deleting the Math.max floor ALL left this
+    // suite green. A bound nothing holds in place is a comment, not a bound.
+
+    @Test
+    void cacheTtl_overTheCeiling_isClampedDownToIt_notHonouredAsConfigured() {
+        // A chart/env override asking for ten minutes of positive cache must NOT get ten
+        // minutes of suspension-staleness: the effective TTL is the ceiling.
+        var stub = new StubExchange(n -> Mono.just(jsonResponse(HttpStatus.OK, "{\"bearer\":\"c\"}")));
+        var f = filter(stub, 600_000L, BffJwtExchangeWebFilter.DEFAULT_CACHE_TTL_CEILING_MS, 10_000);
+
+        assertThat(f.cacheTtlMillis())
+                .as("effective TTL = min(configured, ceiling) — the clamp IS the bound")
+                .isEqualTo(BffJwtExchangeWebFilter.DEFAULT_CACHE_TTL_CEILING_MS);
+        assertThat(f.cacheEnabled()).isTrue();
+    }
+
+    @Test
+    void cacheTtlCeiling_documentedDefault_is60000ms() {
+        // The ceiling was an anonymous 60_000L literal inside the clamp expression. Naming
+        // it is what lets this assertion exist at all; the YAML guard below pins the wired
+        // default, this one pins the code-side fallback the @Value falls back to.
+        assertThat(BffJwtExchangeWebFilter.DEFAULT_CACHE_TTL_CEILING_MS).isEqualTo(60_000L);
+        var stub = new StubExchange(n -> Mono.just(jsonResponse(HttpStatus.OK, "{\"bearer\":\"c\"}")));
+        assertThat(filter(stub, 5_000L).cacheTtlCeilingMillis()).isEqualTo(60_000L);
+    }
+
+    @Test
+    void cacheTtlCeiling_isConfigurable_andCanTightenBelowTheConfiguredTtl() {
+        // The point of making the ceiling a property: a ban-critical deployment pins a
+        // tighter guaranteed bound ONCE, instead of auditing every chart override of
+        // cache-ttl-ms. 5s configured, 1s ceiling ⇒ a 1s staleness window.
+        var stub = new StubExchange(n -> Mono.just(jsonResponse(HttpStatus.OK, "{\"bearer\":\"c-" + n + "\"}")));
+        var f = filter(stub, 5_000L, 1_000L, 10_000);
+
+        assertThat(f.cacheTtlMillis()).isEqualTo(1_000L);
+        assertThat(f.cacheTtlCeilingMillis()).isEqualTo(1_000L);
+    }
+
+    @Test
+    void cacheTtlCeiling_nonPositive_disablesTheCache_soAMisconfiguredCeilingCannotWiden() {
+        // The fail-CLOSED reading of "maximum cache lifetime = 0": no entry may live, so
+        // the cache is off and every request re-consults admin-bff's suspension gate. The
+        // opposite reading (ignore the bad ceiling, keep the 5s TTL) would let a typo
+        // silently REOPEN the window, which is the bug class this bound exists for.
+        var stub = new StubExchange(n -> Mono.just(jsonResponse(HttpStatus.OK, "{\"bearer\":\"c-" + n + "\"}")));
+        var f = filter(stub, 5_000L, 0L, 10_000);
+
+        assertThat(f.cacheEnabled()).isFalse();
+        assertThat(f.cacheTtlMillis()).isZero();
+        for (int i = 1; i <= 3; i++) {
+            var ex = exchange("bff_ceiling-zero");
+            var chain = new RecordingChain();
+            StepVerifier.create(f.filter(ex, chain)).verifyComplete();
+            assertThat(chain.forwardedAuth()).isEqualTo("Bearer c-" + i);
+        }
+        assertThat(stub.calls).as("ceiling 0 ⇒ no caching ⇒ the gate is re-consulted every request")
+                .hasValue(3);
+        assertThat(f.cachedEntryCount()).isZero();
+    }
+
+    @Test
+    void cacheDisabled_neverWritesTheCacheMap_notEvenExpiredEntries() {
+        // Pins the DOCUMENTED disabled posture ("never read OR written") rather than just
+        // its externally-identical side effect. Without this, making cacheEnabled always
+        // true is invisible: entries written with a 0ms TTL are born expired, so the
+        // re-exchange counts match while the map silently fills to cache-max-size.
+        var stub = new StubExchange(n -> Mono.just(jsonResponse(HttpStatus.OK, "{\"bearer\":\"c-" + n + "\"}")));
+        var f = filter(stub, 0L);
+
+        for (int i = 0; i < 5; i++) {
+            StepVerifier.create(f.filter(exchange("bff_off-" + i), new RecordingChain())).verifyComplete();
+        }
+        assertThat(f.cacheEnabled()).isFalse();
+        assertThat(f.cachedEntryCount()).as("the disabled cache is never written").isZero();
+    }
+
+    @Test
+    void cacheMaxSize_boundsTheMap_underAFloodOfDistinctSessions_withoutDenyingAnyone() {
+        // The entry bound sheds CACHE, never AUTHORIZATION: past capacity each request
+        // still swaps and forwards, it just doesn't get memoised. A long TTL keeps every
+        // entry live so the expired-sweep cannot mask a missing bound.
+        var stub = new StubExchange(n -> Mono.just(jsonResponse(HttpStatus.OK, "{\"bearer\":\"c-" + n + "\"}")));
+        var f = filter(stub, 60_000L, 60_000L, 4);
+
+        for (int i = 0; i < 50; i++) {
+            var chain = new RecordingChain();
+            StepVerifier.create(f.filter(exchange("bff_flood-" + i), chain)).verifyComplete();
+            assertThat(chain.forwardedAuth()).as("over-capacity requests are still authorized")
+                    .isEqualTo("Bearer c-" + (i + 1));
+        }
+        assertThat(f.cacheMaxSize()).isEqualTo(4);
+        assertThat(f.cachedEntryCount())
+                .as("50 distinct sessions must not grow a 4-entry cache")
+                .isLessThanOrEqualTo(4);
+    }
+
+    @Test
+    void cacheMaxSize_nonPositive_isFlooredToOne_notLeftUnbounded() {
+        var stub = new StubExchange(n -> Mono.just(jsonResponse(HttpStatus.OK, "{\"bearer\":\"c-" + n + "\"}")));
+        var f = filter(stub, 60_000L, 60_000L, 0);
+
+        assertThat(f.cacheMaxSize()).as("a 0/negative bound must floor to 1, never to unbounded")
+                .isEqualTo(1);
+        for (int i = 0; i < 10; i++) {
+            StepVerifier.create(f.filter(exchange("bff_floor-" + i), new RecordingChain())).verifyComplete();
+        }
+        assertThat(f.cachedEntryCount()).isLessThanOrEqualTo(1);
+    }
+
+    @Test
+    void applicationYml_cacheTtlCeilingAndMaxSize_areWiredWithTheDocumentedDefaults()
+            throws java.io.IOException {
+        // Same drift guard as the cache-ttl-ms one above, for the two knobs this change
+        // added: the @Value fallbacks are DEAD while application.yml supplies the keys, so
+        // an unwired (or re-defaulted) YAML key is what actually ships.
+        var sources = new org.springframework.boot.env.YamlPropertySourceLoader()
+                .load("application.yml", new org.springframework.core.io.ClassPathResource("application.yml"));
+        assertThat(yamlValue(sources, "hugmesh.gateway.bff-exchange.cache-ttl-max-ms"))
+                .as("the TTL ceiling must be wired + default to the documented 60000ms")
+                .isNotNull().contains(":60000}");
+        assertThat(yamlValue(sources, "hugmesh.gateway.bff-exchange.cache-max-size"))
+                .as("the entry bound must be wired + default to the documented 10000")
+                .isNotNull().contains(":10000}");
+    }
+
+    private static String yamlValue(
+            java.util.List<org.springframework.core.env.PropertySource<?>> sources, String key) {
+        return sources.stream()
+                .map(ps -> ps.getProperty(key))
+                .filter(java.util.Objects::nonNull).map(String::valueOf)
+                .findFirst().orElse(null);
     }
 
     // ── (vi) NEGATIVE-NEVER-CACHED: failed swap then a successful one ⇒ 2 calls ──

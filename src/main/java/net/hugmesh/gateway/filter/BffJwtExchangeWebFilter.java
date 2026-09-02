@@ -59,11 +59,29 @@ import java.util.concurrent.ConcurrentHashMap;
  * 403) — but a CACHE HIT skips that round-trip, so a session suspended AFTER its swap was
  * cached keeps authorizing until the entry expires. The TTL therefore bounds the staleness
  * of a just-suspended session, so the default is a small {@code 5000}ms (≈ the cluster's
- * revocation poll cadence) rather than the old 60s, which left a full minute of bypass. The
- * value is clamped to a 60s hard ceiling. Set {@code cache-ttl-ms} to {@code 0} (or any
- * non-positive value) to DISABLE the positive cache entirely — every request then
- * re-consults the admin-bff exchange gate, giving a ZERO suspension-bypass window at the
- * cost of one in-cluster swap call per request (ban-critical deployments).
+ * revocation poll cadence) rather than the old 60s, which left a full minute of bypass.
+ *
+ * <p><b>The bound itself is configurable and stated at startup.</b> The effective TTL is
+ * {@code min(cache-ttl-ms, cache-ttl-max-ms)}, where {@code cache-ttl-max-ms} is the
+ * CEILING — documented default {@link #DEFAULT_CACHE_TTL_CEILING_MS} ({@code 60000}ms),
+ * i.e. the widest window this deployment tolerates. It was an unnamed {@code 60_000L}
+ * literal before, so a stricter deployment could not tighten it without a code change.
+ * Both directions are now logged: a {@code cache-ttl-ms} that gets CLAMPED down warns with
+ * the configured AND effective values (previously silent — an operator asking for ten
+ * minutes just got sixty seconds, with nothing saying so), and a {@code cache-ttl-max-ms}
+ * raised above the documented default warns that the bypass window has been widened.
+ * Set {@code cache-ttl-ms} to {@code 0} (or any non-positive value) to DISABLE the
+ * positive cache entirely — every request then re-consults the admin-bff exchange gate,
+ * giving a ZERO suspension-bypass window at the cost of one in-cluster swap call per
+ * request (ban-critical deployments). A non-positive {@code cache-ttl-max-ms} means the
+ * same thing (a maximum lifetime of zero admits no entry) and is the fail-CLOSED reading:
+ * a misconfigured ceiling can only ever TIGHTEN the window, never widen it. When the cache
+ * is off it is never read OR written — the map stays empty.
+ *
+ * <p><b>Entry-count bound.</b> {@code cache-max-size} (default {@code 10000}, floored at 1)
+ * caps the map so a flood of distinct {@code bff_} sessions cannot grow it without limit;
+ * at capacity the filter first drops TTL-elapsed entries and, failing that, declines to
+ * cache the new swap (it still forwards — the bound sheds cache, never authorization).
  *
  * <p>The perf-preserving alternative for production is to have the admin-bff suspend path
  * write a {@code subject:<custody-sub>} key to the gateway {@code RevocationListService} so
@@ -95,6 +113,17 @@ public class BffJwtExchangeWebFilter implements WebFilter, Ordered {
      *  {@code /bff/internal/} prefix — requires the X-Internal-Token header + mTLS). */
     private static final String EXCHANGE_PATH = "/bff/internal/session/exchange";
 
+    /**
+     * Documented default for {@code hugmesh.gateway.bff-exchange.cache-ttl-max-ms} — the
+     * hard ceiling the configured {@code cache-ttl-ms} is clamped to, and therefore the
+     * WIDEST suspension-staleness window a default deployment can have. It was an
+     * unnamed, unconfigurable {@code 60_000L} literal in the clamp expression, which
+     * meant (a) no deployment could tighten the ceiling without editing code, and (b) no
+     * test could pin it — every mutation that deleted or widened the clamp left the suite
+     * green (measured). Named + configurable + guarded here.
+     */
+    static final long DEFAULT_CACHE_TTL_CEILING_MS = 60_000L;
+
     private final WebClient exchangeClient;
     private final String internalTokenHeader;
     private final String internalToken;
@@ -103,6 +132,12 @@ public class BffJwtExchangeWebFilter implements WebFilter, Ordered {
      *  bounded size. A {@link ConcurrentHashMap} (no Caffeine dependency on the gateway
      *  classpath) with manual TTL + size eviction — successful swaps only. */
     private final long cacheTtlMillis;
+    /** The configured CEILING the effective TTL is clamped to — i.e. the widest
+     *  suspension-staleness window this deployment will tolerate. Configurable via
+     *  {@code hugmesh.gateway.bff-exchange.cache-ttl-max-ms}; documented default
+     *  {@link #DEFAULT_CACHE_TTL_CEILING_MS}. Held for the startup diagnostics and for
+     *  the bound's test guard — the clamp itself is applied once in the constructor. */
+    private final long cacheTtlCeilingMillis;
     private final int cacheMaxSize;
     /** False when {@code cache-ttl-ms <= 0}: the positive swap cache is disabled entirely
      *  and EVERY request re-consults the admin-bff exchange gate (zero suspension-bypass
@@ -116,26 +151,57 @@ public class BffJwtExchangeWebFilter implements WebFilter, Ordered {
                     String internalTokenHeader,
             @Value("${hugmesh.gateway.bff-exchange.internal-token:}") String internalToken,
             @Value("${hugmesh.gateway.bff-exchange.cache-ttl-ms:5000}") long cacheTtlMillis,
+            @Value("${hugmesh.gateway.bff-exchange.cache-ttl-max-ms:60000}") long cacheTtlCeilingMillis,
             @Value("${hugmesh.gateway.bff-exchange.cache-max-size:10000}") int cacheMaxSize,
             @Value("${hugmesh.gateway.bff-exchange.request-timeout-ms:3000}") long requestTimeoutMillis) {
         this.exchangeClient = bffExchangeWebClient;
         this.internalTokenHeader = internalTokenHeader;
         this.internalToken = internalToken;
         // The TTL IS the suspension-bypass window (a cache hit skips admin-bff's exchange
-        // suspension gate), so:
-        //   * <= 0 DISABLES the cache entirely — every request re-consults the gate, zero
-        //     bypass window (ban-critical deployments accept the per-request swap cost);
-        //   * otherwise clamp to the 60s hard ceiling so a misconfiguration can never cache
-        //     a swap (and thus stale a just-suspended session) for longer than a minute.
+        // suspension gate), so it is CLAMPED to a configurable ceiling
+        // (cache-ttl-max-ms, documented default DEFAULT_CACHE_TTL_CEILING_MS = 60s):
+        //   * an effective TTL <= 0 DISABLES the cache entirely — every request re-consults
+        //     the gate, zero bypass window (ban-critical deployments accept the per-request
+        //     swap cost). That covers cache-ttl-ms<=0 AND a non-positive ceiling, which is
+        //     the TIGHTEST reading of "the maximum cache lifetime is zero" and therefore the
+        //     fail-CLOSED one — a misconfigured ceiling can never WIDEN the window;
+        //   * otherwise min(configured, ceiling) so a misconfiguration cannot cache a swap
+        //     (and thus stale a just-suspended session) for longer than the ceiling allows.
         // The default (5s, on the @Value above) matches the cluster's revocation poll cadence.
-        this.cacheEnabled = cacheTtlMillis > 0;
-        this.cacheTtlMillis = this.cacheEnabled ? Math.min(cacheTtlMillis, 60_000L) : 0L;
+        this.cacheTtlCeilingMillis = cacheTtlCeilingMillis;
+        long effectiveTtlMillis = Math.min(cacheTtlMillis, cacheTtlCeilingMillis);
+        this.cacheEnabled = effectiveTtlMillis > 0;
+        this.cacheTtlMillis = this.cacheEnabled ? effectiveTtlMillis : 0L;
         this.cacheMaxSize = Math.max(cacheMaxSize, 1);
         this.requestTimeout = Duration.ofMillis(requestTimeoutMillis);
+        // Clamping used to be SILENT: an operator who asked for a 10-minute cache simply got
+        // 60s, and an operator who raised the ceiling silently reopened the bypass window.
+        // Both are now stated at startup, because the only other evidence of either is a
+        // suspended session that keeps working (or a swap storm) in production.
+        if (cacheTtlCeilingMillis <= 0) {
+            log.warn("[bff-exchange] cache-ttl-max-ms={} is non-positive — the positive-swap "
+                            + "cache is DISABLED (zero suspension-bypass window, one swap per request)",
+                    cacheTtlCeilingMillis);
+        } else if (cacheTtlMillis > cacheTtlCeilingMillis) {
+            log.warn("[bff-exchange] configured cache-ttl-ms={} EXCEEDS the ceiling "
+                            + "cache-ttl-max-ms={} — CLAMPED to {}ms; the suspension-staleness "
+                            + "window is the clamped value, not the configured one",
+                    cacheTtlMillis, cacheTtlCeilingMillis, this.cacheTtlMillis);
+        }
+        if (cacheTtlCeilingMillis > DEFAULT_CACHE_TTL_CEILING_MS) {
+            log.warn("[bff-exchange] cache-ttl-max-ms={} RAISES the suspension-staleness "
+                            + "ceiling above the documented {}ms default — a suspended session "
+                            + "can keep authorizing for up to {}ms on a cache hit",
+                    cacheTtlCeilingMillis, DEFAULT_CACHE_TTL_CEILING_MS, this.cacheTtlMillis);
+        }
+        if (cacheMaxSize < 1) {
+            log.warn("[bff-exchange] cache-max-size={} is below the floor — using 1 entry",
+                    cacheMaxSize);
+        }
         log.info("[bff-exchange] filter ENABLED (hugmesh.gateway.bff-exchange.enabled) — "
-                        + "cache={} cache-ttl={}ms max-size={} timeout={}ms",
+                        + "cache={} cache-ttl={}ms (ceiling {}ms) max-size={} timeout={}ms",
                 this.cacheEnabled ? "on" : "OFF (zero suspension-bypass window)",
-                this.cacheTtlMillis, this.cacheMaxSize, requestTimeoutMillis);
+                this.cacheTtlMillis, cacheTtlCeilingMillis, this.cacheMaxSize, requestTimeoutMillis);
     }
 
     @Override
@@ -246,6 +312,36 @@ public class BffJwtExchangeWebFilter implements WebFilter, Ordered {
             if (cache.size() >= cacheMaxSize) return;
         }
         cache.put(hash, new CachedSwap(custodyJwt, System.currentTimeMillis() + cacheTtlMillis));
+    }
+
+    // ── bound accessors (package-private; the guard for the clamp) ──────────────
+
+    /** Effective positive-cache TTL after the ceiling clamp: the actual
+     *  suspension-staleness window. {@code 0} when the cache is disabled. */
+    long cacheTtlMillis() {
+        return cacheTtlMillis;
+    }
+
+    /** The configured ceiling the TTL was clamped to ({@code cache-ttl-max-ms}). */
+    long cacheTtlCeilingMillis() {
+        return cacheTtlCeilingMillis;
+    }
+
+    /** Effective cache entry bound after the floor ({@code cache-max-size}, min 1). */
+    int cacheMaxSize() {
+        return cacheMaxSize;
+    }
+
+    /** False when the effective TTL is non-positive — the zero-bypass-window posture,
+     *  in which the cache map is never read OR written. */
+    boolean cacheEnabled() {
+        return cacheEnabled;
+    }
+
+    /** Live entry count of the positive-swap cache — lets the guard prove the size
+     *  bound holds under a flood, and that the disabled posture writes NOTHING. */
+    int cachedEntryCount() {
+        return cache.size();
     }
 
     /** A cached positive swap: the custody JWT and the wall-clock millis after which it
