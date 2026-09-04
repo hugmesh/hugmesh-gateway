@@ -532,21 +532,33 @@ class BffJwtExchangeWebFilterTest {
 
     /** The {@code @Value} fallback Spring would inject for {@code key} when the property is
      *  absent, read from the REAL constructor parameter annotation (runtime-retained), not
-     *  from the source text — a commented-out or reworded annotation cannot satisfy it. */
+     *  from the source text — a commented-out or reworded annotation cannot satisfy it.
+     *
+     *  <p>Every declared constructor is scanned and the DISTINCT fallbacks collected, rather
+     *  than returning the first hit: {@code getDeclaredConstructors()} has no specified
+     *  order, so a second {@code @Value}-carrying constructor would otherwise make this
+     *  helper read an arbitrary one of them and pin the wrong number. Two different
+     *  fallbacks for one key is itself the defect, so it fails loudly instead. */
     private static String valueFallback(String key) {
         String prefix = "${" + key + ":";
+        var found = new java.util.LinkedHashSet<String>();
         for (java.lang.reflect.Constructor<?> ctor
                 : BffJwtExchangeWebFilter.class.getDeclaredConstructors()) {
             for (java.lang.annotation.Annotation[] onParam : ctor.getParameterAnnotations()) {
                 for (java.lang.annotation.Annotation a : onParam) {
                     if (a instanceof org.springframework.beans.factory.annotation.Value v
                             && v.value().startsWith(prefix) && v.value().endsWith("}")) {
-                        return v.value().substring(prefix.length(), v.value().length() - 1);
+                        found.add(v.value().substring(prefix.length(), v.value().length() - 1));
                     }
                 }
             }
         }
-        return null;
+        assertThat(found)
+                .as("%s must have ONE @Value fallback across all constructors — "
+                        + "declared-constructor order is unspecified, so disagreeing "
+                        + "fallbacks would be read arbitrarily", key)
+                .hasSizeLessThan(2);
+        return found.isEmpty() ? null : found.iterator().next();
     }
 
     /** The default baked into application.yml's {@code ${ENV_VAR:default}} placeholder for

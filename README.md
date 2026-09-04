@@ -461,8 +461,10 @@ forward-looking, not-yet-started work in *Roadmap* below):
   `src/main/java/net/hugmesh/gateway/filter/BffJwtExchangeWebFilter.java` and the
   `(v-d) THE BOUND ITSELF` block of `BffJwtExchangeWebFilterTest`.
 
-  A follow-up 26-mutation battery (2026-09-04) re-measured those guards and found two
-  survivors, both now closed: the constructor's **`@Value` fallbacks** were unpinned, so
+  A follow-up 26-mutation battery (2026-09-04) re-measured those guards and found **four**
+  survivors: two real gaps (both closed here), one already held by the ordering Spring Boot
+  slices but not by the filter unit suites the battery ran, and one *equivalent* mutant. The
+  two real gaps were the constructor's **`@Value` fallbacks**, which nothing pinned, so
   widening the `cache-ttl-max-ms` fallback to 600 s or reverting `cache-ttl-ms` to the old
   60 s left every filter suite green — those fallbacks are the effective defaults for any
   deployment that *replaces* the config locations rather than layering over the packaged
@@ -470,9 +472,10 @@ forward-looking, not-yet-started work in *Roadmap* below):
   of each number (the named constant, the `@Value` fallback, the wired YAML default) are
   now required to agree, read through the runtime annotation rather than the source text.
   The filter's own `getOrder()` is also pinned in the unit suite now, not only in the
-  ordering Spring Boot slices. 25 of 26 mutations go red; the one survivor is an
-  *equivalent* mutant (dropping the guard on the cache **read** while the **write** guard
-  keeps the map provably empty) and is recorded as such in the test.
+  ordering Spring Boot slices. 22 of 26 went red before this change and **25 of 26** go red
+  after; the one remaining survivor is an *equivalent* mutant (dropping the guard on the
+  cache **read** while the **write** guard keeps the map provably empty) and is recorded as
+  such in the test.
 
   **Still open — proactive invalidation on suspension (needs a cross-repo push).**
   The remaining half of the design question ("should a suspension event evict cached
