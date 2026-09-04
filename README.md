@@ -461,6 +461,19 @@ forward-looking, not-yet-started work in *Roadmap* below):
   `src/main/java/net/hugmesh/gateway/filter/BffJwtExchangeWebFilter.java` and the
   `(v-d) THE BOUND ITSELF` block of `BffJwtExchangeWebFilterTest`.
 
+  A follow-up 26-mutation battery (2026-09-04) re-measured those guards and found two
+  survivors, both now closed: the constructor's **`@Value` fallbacks** were unpinned, so
+  widening the `cache-ttl-max-ms` fallback to 600 s or reverting `cache-ttl-ms` to the old
+  60 s left every filter suite green — those fallbacks are the effective defaults for any
+  deployment that *replaces* the config locations rather than layering over the packaged
+  `application.yml`, and a deleted YAML key drops straight onto them. All three statements
+  of each number (the named constant, the `@Value` fallback, the wired YAML default) are
+  now required to agree, read through the runtime annotation rather than the source text.
+  The filter's own `getOrder()` is also pinned in the unit suite now, not only in the
+  ordering Spring Boot slices. 25 of 26 mutations go red; the one survivor is an
+  *equivalent* mutant (dropping the guard on the cache **read** while the **write** guard
+  keeps the map provably empty) and is recorded as such in the test.
+
   **Still open — proactive invalidation on suspension (needs a cross-repo push).**
   The remaining half of the design question ("should a suspension event evict cached
   entries instead of waiting out the TTL?") cannot be usefully answered inside this

@@ -409,6 +409,13 @@ class BffJwtExchangeWebFilterTest {
         }
         assertThat(f.cacheEnabled()).isFalse();
         assertThat(f.cachedEntryCount()).as("the disabled cache is never written").isZero();
+        // NOT CLOSED, deliberately: dropping the `cacheEnabled ? … : null` guard on the
+        // cache READ stays green, and is an EQUIVALENT mutant given the write guard above —
+        // with writes gated off the map is provably empty, so a read of it can only ever
+        // return null. Closing it would need a production hook to seed the cache from a
+        // test, i.e. production surface added for a test's benefit. Recorded here rather
+        // than papered over; the pair (read guard + write guard) is only observable through
+        // the write, which IS guarded.
     }
 
     @Test
@@ -458,6 +465,99 @@ class BffJwtExchangeWebFilterTest {
         assertThat(yamlValue(sources, "hugmesh.gateway.bff-exchange.cache-max-size"))
                 .as("the entry bound must be wired + default to the documented 10000")
                 .isNotNull().contains(":10000}");
+    }
+
+    @Test
+    void constructorValueFallbacks_matchTheDocumentedConstantAndTheWiredYaml()
+            throws java.io.IOException {
+        // The @Value fallbacks are what Spring injects when the property is ABSENT — the
+        // shape a deployment lands in the moment it REPLACES the config locations
+        // (SPRING_CONFIG_LOCATION pointed at a mounted ConfigMap) instead of layering over
+        // the packaged application.yml, and the numbers the class javadoc calls "the
+        // documented default". Nothing pinned them: on the tree that added the ceiling,
+        // widening the `cache-ttl-max-ms` fallback to 600000 and reverting the
+        // `cache-ttl-ms` fallback to the old 60000 BOTH left this suite and the cookie
+        // suite fully green (measured 2026-09-04, 26-mutation battery) — the YAML guards
+        // above cannot see the annotation, and every other case passes the constructor
+        // explicit values. Read through the real annotation metadata Spring itself reads
+        // (never the source text), and require all THREE statements of each number — the
+        // named constant, the @Value fallback, the wired YAML default — to agree, so
+        // deleting a YAML key cannot silently drop the effective default onto an
+        // unguarded, wider fallback.
+        var sources = new org.springframework.boot.env.YamlPropertySourceLoader()
+                .load("application.yml", new org.springframework.core.io.ClassPathResource("application.yml"));
+
+        assertThat(valueFallback("hugmesh.gateway.bff-exchange.cache-ttl-max-ms"))
+                .as("the ceiling fallback IS the widest suspension-staleness window a "
+                        + "config-less deployment can have — it must equal the documented "
+                        + "constant and the wired YAML default")
+                .isNotNull()
+                .isEqualTo(String.valueOf(BffJwtExchangeWebFilter.DEFAULT_CACHE_TTL_CEILING_MS))
+                .isEqualTo(yamlFallback(sources, "hugmesh.gateway.bff-exchange.cache-ttl-max-ms"));
+
+        assertThat(valueFallback("hugmesh.gateway.bff-exchange.cache-ttl-ms"))
+                .as("the TTL fallback must stay at 5000ms — reverting it to 60000 reopens "
+                        + "the full-minute bypass window with no YAML change to review")
+                .isNotNull()
+                .isEqualTo("5000")
+                .isEqualTo(yamlFallback(sources, "hugmesh.gateway.bff-exchange.cache-ttl-ms"));
+
+        assertThat(valueFallback("hugmesh.gateway.bff-exchange.cache-max-size"))
+                .as("the entry-bound fallback must equal the wired YAML default")
+                .isNotNull()
+                .isEqualTo("10000")
+                .isEqualTo(yamlFallback(sources, "hugmesh.gateway.bff-exchange.cache-max-size"));
+    }
+
+    // ── (viii) ORDER — before Spring Security, one slot behind the cookie bridge ──
+
+    @Test
+    void order_isBeforeSpringSecurity_andOneSlotBehindTheCookieBridge() {
+        // The swap MUST rewrite Authorization before WebFilterChainProxy(-100) hands the
+        // value to the JWT decoder, which cannot validate an opaque bff_. Pinned in the
+        // ordering Spring Boot slices (BffJwtExchangeFilterOrderingSpringBootTest) but not,
+        // until now, in this suite: moving getOrder() to a positive 105 left both filter
+        // unit suites green while the SSO bridge was dead. Cheap to hold here too.
+        var stub = new StubExchange(n -> Mono.just(jsonResponse(HttpStatus.OK, "{\"bearer\":\"c\"}")));
+        var f = filter(stub);
+
+        assertThat(f.getOrder()).isEqualTo(org.springframework.core.Ordered.HIGHEST_PRECEDENCE + 5);
+        assertThat(f.getOrder())
+                .as("must run BEFORE Spring Security's WebFilterChainProxy (-100)")
+                .isLessThan(-100);
+        assertThat(new BffCookieToBearerWebFilter().getOrder())
+                .as("the cookie bridge must have synthesised the bearer before this filter reads it")
+                .isLessThan(f.getOrder());
+    }
+
+    /** The {@code @Value} fallback Spring would inject for {@code key} when the property is
+     *  absent, read from the REAL constructor parameter annotation (runtime-retained), not
+     *  from the source text — a commented-out or reworded annotation cannot satisfy it. */
+    private static String valueFallback(String key) {
+        String prefix = "${" + key + ":";
+        for (java.lang.reflect.Constructor<?> ctor
+                : BffJwtExchangeWebFilter.class.getDeclaredConstructors()) {
+            for (java.lang.annotation.Annotation[] onParam : ctor.getParameterAnnotations()) {
+                for (java.lang.annotation.Annotation a : onParam) {
+                    if (a instanceof org.springframework.beans.factory.annotation.Value v
+                            && v.value().startsWith(prefix) && v.value().endsWith("}")) {
+                        return v.value().substring(prefix.length(), v.value().length() - 1);
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+    /** The default baked into application.yml's {@code ${ENV_VAR:default}} placeholder for
+     *  {@code key} — {@code null} when the key is not wired at all. */
+    private static String yamlFallback(
+            java.util.List<org.springframework.core.env.PropertySource<?>> sources, String key) {
+        String raw = yamlValue(sources, key);
+        if (raw == null) return null;
+        int colon = raw.lastIndexOf(':');
+        int brace = raw.lastIndexOf('}');
+        return (colon < 0 || brace < colon) ? raw : raw.substring(colon + 1, brace);
     }
 
     private static String yamlValue(
