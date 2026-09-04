@@ -96,6 +96,27 @@ INSERT INTO gateway_route_access (gateway, url_pattern, role, allow) VALUES
   ('hugmesh-be-gateway',   '/bff/superadmin/**',        'ROLE_SUPERADMIN',    true),  -- superadmin infra console (tailnet)
   ('hugmesh-be-gateway',   '/api/**',               'ROLE_USER',     true),
   ('hugmesh-be-gateway',   '/api/admin/**',         'ROLE_ADMIN',    true),
+  -- ── edge-AI /v1 path space (be-gateway) ────────────────────────────────────
+  -- A path space DISTINCT from /api/** above, fronted by three OPTIONAL slugs:
+  -- edge-ai-tts (/v1/synthesize/**, matrix-ui voice synthesis), edge-ai-analysis
+  -- (/v1/analyze/**) and edge-ai itself — whose be-gateway route is a Host
+  -- predicate (ai.<domain>) with NO Path predicate, i.e. the /v1 CATCHALL.
+  -- WITHOUT the /v1/** base row every other /v1 path (/v1/chat/completions,
+  -- /v1/embeddings, /v1/models) matched no rule here, decide() returned NO_RULE,
+  -- and NO_RULE FORWARDS: in this dev stack the model API was governed only by
+  -- the coarse authenticated() floor, so a principal holding no ROLE_USER at all
+  -- (a ROLE_MATRIX-only account) reached it.
+  -- Each row is a plain ROLE_USER capability floor — no ROLE_ADMIN pairing (the
+  -- converter does not auto-grant ROLE_USER to admins, who reach it via the
+  -- gateway's own bypass). The two sub-path rows are LONGER than the base, so
+  -- longest-pattern-match keeps them deciding their own paths rather than the
+  -- base widening them.
+  -- Third leg of the dual-write trio, byte-for-byte: the cluster seed
+  -- (route-access/initdb/20-schema.sql) and the baked CanonicalSeed.be() rows
+  -- already carry all three; this local-dev copy carried none (issue #4).
+  ('hugmesh-be-gateway',   '/v1/analyze/**',        'ROLE_USER',     true),  -- edge-ai-analysis verdict API
+  ('hugmesh-be-gateway',   '/v1/synthesize/**',     'ROLE_USER',     true),  -- edge-ai-tts voice synthesis API
+  ('hugmesh-be-gateway',   '/v1/**',                'ROLE_USER',     true),  -- edge-ai OpenAI-compatible inference API
   -- fe-gateway (hugmesh.net host + MFE + /bff proxy)
   ('hugmesh-fe-gateway',   '/',                     'PUBLIC',        true),
   -- Social SPA shells congruent with the be platform gates.

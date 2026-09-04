@@ -74,14 +74,27 @@ import java.util.Optional;
  * already decided whether an unauthenticated path is reachable, exactly as the
  * resource-access filter does.
  *
- * <p><b>Inbound {@code X-Domain} is always stripped.</b> {@code X-Domain} is the
- * canonical gateway-stamped brand header; on the way IN it is client-supplied and
- * therefore untrusted, so it is removed unconditionally at the top of
- * {@link #filter} — ahead of every short-circuit above, anonymous traffic
- * included. No downstream consumer of the header exists yet, so nothing is stamped
- * in its place; the strip is what makes stamping the validated {@code targetDomain}
- * safe whenever that consumer lands. Same posture {@code ExternalAuthHeaderFilter}
- * holds for the {@code External-*} trio.
+ * <p><b>Inbound {@code X-Domain} is always stripped; the outbound stamp is
+ * opt-in.</b> {@code X-Domain} is the canonical gateway-stamped brand header. On
+ * the way IN it is client-supplied and therefore untrusted, so it is removed
+ * UNCONDITIONALLY at the top of {@link #filter} — ahead of every short-circuit
+ * above, anonymous traffic included, and in BOTH flag states. On the way OUT the
+ * gateway stamps the registry-validated target brand only when
+ * {@code app.domain-header.forward} is on; that flag defaults {@code false}, so the
+ * producer half SHIPS INERT and the filter is byte-identical to its strip-only
+ * behaviour until an operator flips it. Same posture
+ * {@code ExternalAuthHeaderFilter} holds for the {@code External-*} trio: drop the
+ * client copy first, then stamp only a gateway-derived value.
+ *
+ * <p><b>Why the stamp sits with the strip and not at the route-access decision.</b>
+ * The header exists for public-read domain partitioning — a downstream scoping
+ * <i>anonymous</i> reads to the requesting brand (hugmesh-games decision 026). An
+ * anonymous request returns {@code chain.filter()} from the FIRST branch of
+ * {@link #filter} and never reaches the decision, so a stamp placed there would be
+ * missing from exactly the traffic that needs it (and from both privileged
+ * bypasses). One call site at the top covers every path with one value, derived
+ * from the {@code Host} through {@link DomainRegistry} — never read back off the
+ * request.
  */
 @Component
 public class GatewayRouteAccessFilter implements WebFilter, Ordered {
@@ -111,32 +124,80 @@ public class GatewayRouteAccessFilter implements WebFilter, Ordered {
      *  before the route-access decide() that consults authorities). */
     private final long mfaFreshnessWindowMillis;
 
+    /**
+     * OUTBOUND brand stamp — {@code app.domain-header.forward}, default
+     * {@code false}, so the producer half SHIPS INERT.
+     *
+     * <p>When {@code true} every forwarded request carries
+     * {@code X-Domain: <targetDomain>} — the brand this request's {@code Host}
+     * resolves to through {@link DomainRegistry} ({@code "default"} on a
+     * single-tenant cluster, so the header is always present and a downstream can
+     * tell "came through the gateway" from "reached me directly"). When
+     * {@code false} nothing is stamped. The inbound strip is NOT flag-gated in
+     * either state, so a downstream can never receive a client-forged value.
+     *
+     * <p><b>Why a flag rather than an unconditional stamp.</b> No service reads this
+     * header today (verified org-wide: the only {@code X-Domain}-ish header in the
+     * org is hugmesh-games' {@code X-Domain-Denied} RESPONSE header, and its
+     * {@code DomainGuardFilter} scopes off the JWT's {@code DOMAIN_} authority, not
+     * a forwarded request header). The gateway also fronts third-party servers
+     * (tuwunel, Akkoma, Ollama, Casdoor) that have no reason to receive a new header
+     * until something asks. The named consumer — hugmesh-games decision 026, whose
+     * "public/anonymous catalog reads … stay global" section says a brand-partitioned
+     * public catalog "needs the gateway to forward a Host-derived brand (e.g.
+     * {@code X-Domain}), which it does not today" — lands in ITS repo; an operator
+     * then flips this one property. Landing the producer this way changes no byte of
+     * current behaviour and, crucially, fixes the SHAPE of the implementation before
+     * anyone writes it at the decision fall-through, where it would silently miss
+     * every anonymous request.
+     *
+     * <p>Enabling it changes no authorization decision in this gateway: the
+     * {@code route_access} table remains the enforcement surface. It only makes the
+     * already-validated brand legible to services behind the gateway.
+     */
+    private final boolean forwardDomainHeader;
+
     @Autowired
     public GatewayRouteAccessFilter(GatewayRouteAccessService routeAccess,
                                     DomainRegistry domainRegistry,
                                     @Value("${app.mfa.enforce-privileged-floor:false}")
                                             boolean enforcePrivilegedFloor,
                                     @Value("${app.mfa.freshness-window:600000}")
-                                            long mfaFreshnessWindowMillis) {
+                                            long mfaFreshnessWindowMillis,
+                                    @Value("${app.domain-header.forward:false}")
+                                            boolean forwardDomainHeader) {
         this.routeAccess = routeAccess;
         this.domainRegistry = domainRegistry;
         this.enforcePrivilegedFloor = enforcePrivilegedFloor;
         this.mfaFreshnessWindowMillis = mfaFreshnessWindowMillis;
+        this.forwardDomainHeader = forwardDomainHeader;
     }
 
-    /** Legacy 2-arg convenience (privileged floor OFF, default 10m window) — keeps
-     *  the pre-D8 test call sites compiling and proves the dark default is the
-     *  byte-identical legacy filter. Production wiring uses the {@code @Autowired}
-     *  constructor above. */
+    /** Pre-{@code domain-header} 4-arg convenience (stamp OFF) — keeps the D8 test
+     *  call sites compiling and pins that the new flag's default leaves the filter
+     *  unchanged. */
+    public GatewayRouteAccessFilter(GatewayRouteAccessService routeAccess,
+                                    DomainRegistry domainRegistry,
+                                    boolean enforcePrivilegedFloor,
+                                    long mfaFreshnessWindowMillis) {
+        this(routeAccess, domainRegistry, enforcePrivilegedFloor,
+                mfaFreshnessWindowMillis, false);
+    }
+
+    /** Legacy 2-arg convenience (privileged floor OFF, default 10m window, stamp
+     *  OFF) — keeps the pre-D8 test call sites compiling and proves the dark
+     *  defaults are the byte-identical legacy filter. Production wiring uses the
+     *  {@code @Autowired} constructor above. */
     public GatewayRouteAccessFilter(GatewayRouteAccessService routeAccess,
                                     DomainRegistry domainRegistry) {
-        this(routeAccess, domainRegistry, false, 600_000L);
+        this(routeAccess, domainRegistry, false, 600_000L, false);
     }
 
     /**
-     * The canonical gateway-stamped brand header. The gateway is (or will be) the
-     * SOLE authority on its value — see {@link #stripClientDomainHeader} and the
-     * forwarding TODO further down.
+     * The canonical gateway-stamped brand header. The gateway is the SOLE authority
+     * on its value: the inbound copy is dropped unconditionally, and the outbound
+     * value — when {@link #forwardDomainHeader} is on — comes only from
+     * {@link #targetDomain}. See {@link #normalizeDomainHeader}.
      */
     static final String X_DOMAIN = "X-Domain";
 
@@ -147,15 +208,16 @@ public class GatewayRouteAccessFilter implements WebFilter, Ordered {
         // ADMIN/GAME-MASTER own-domain bypass, before decide(). `X-Domain` is a
         // CLIENT-SUPPLIED request header on the way in: anyone who can reach the
         // gateway can set it. Every one of the branches below reaches
-        // `chain.filter(exchange)` on its own, so stripping anywhere further down
-        // would leave whole classes of request (anonymous traffic and every
-        // privileged bypass) forwarding an attacker's value verbatim. Stripping
-        // here means a downstream can NEVER receive a client-forged X-Domain,
-        // which is the precondition for the gateway stamping a validated one
-        // later (see the TODO below) — same trust posture ExternalAuthHeaderFilter
-        // holds for the External-* trio, established BEFORE any consumer exists so
-        // the forwarding half can never land on a spoofable header.
-        final ServerWebExchange exchange = stripClientDomainHeader(inbound);
+        // `chain.filter(exchange)` on its own, so acting anywhere further down would
+        // leave whole classes of request (anonymous traffic and every privileged
+        // bypass) forwarding an attacker's value verbatim — and would leave the
+        // OPT-IN stamp missing from exactly the anonymous traffic the header exists
+        // for. Stripping here means a downstream can NEVER receive a client-forged
+        // X-Domain, which is the precondition for stamping a validated one at all —
+        // same trust posture ExternalAuthHeaderFilter holds for the External-* trio,
+        // established BEFORE any consumer exists so the forwarding half can never
+        // land on a spoofable header.
+        final ServerWebExchange exchange = normalizeDomainHeader(inbound);
         String path = exchange.getRequest().getPath().value();
         // Wrap the principal in Optional + defaultIfEmpty so the stream emits
         // exactly one element: a present auth, or an explicit "absent". A bare
@@ -375,53 +437,61 @@ public class GatewayRouteAccessFilter implements WebFilter, Ordered {
                 if (routeAccess.decide(path, targetDomain, userIds, authorities) == Decision.DENY) {
                     return reject(exchange, path);
                 }
-                // TODO (forwarding half only): targetDomain is resolved here but
-                // still not forwarded downstream. Public-read domain partitioning (a
-                // downstream service scoping anonymous/public reads to the requesting
-                // brand) needs an `X-Domain` header carrying this validated value,
-                // mirroring how ExternalAuthHeaderFilter forwards
-                // External-Authorization/External-Auth-Provider/External-Auth-Id.
-                // Still not added speculatively: an org-wide grep finds NO consumer of
-                // an inbound X-Domain REQUEST header — the only X-Domain-ish header in
-                // the org is games' X-Domain-Denied RESPONSE header, and games'
-                // DomainGuardFilter scopes off the JWT's DOMAIN_ authority, not a
-                // forwarded request header. Emitting it now would ship dark.
-                // The STRIP half of this TODO IS implemented — see
-                // stripClientDomainHeader, called unconditionally at the very top of
-                // filter(). That is the half that carries the security value and is
-                // the half that must land FIRST: it means no request can already be
-                // carrying a forged X-Domain when the forwarding half is added, so
-                // the stamped value can never be an attacker's. Whoever adds the
-                // forward MUST keep that strip in place and stamp only the validated
-                // `targetDomain` computed above (never the inbound header), or the
-                // header becomes a brand-spoof injection vector: a caller could forge
-                // X-Domain and read another brand's public partition through a
-                // downstream that trusts the gateway to have validated it.
+                // NOTE (issue #4, TODO 2): the X-Domain producer is NOT here. Both
+                // halves live at the top of filter() in normalizeDomainHeader — the
+                // strip unconditionally, the stamp behind app.domain-header.forward.
+                // This line looks like the natural home for it (targetDomain is in
+                // hand) and it is the WRONG one: the consumer the header exists for
+                // scopes ANONYMOUS reads, and an anonymous request returns from the
+                // first branch above without ever reaching this statement, as do both
+                // privileged bypasses. What remains open is the CONSUMER, not the
+                // producer — no service in the org reads an inbound X-Domain request
+                // header yet (hugmesh-games' DomainGuardFilter SETS an
+                // X-Domain-Denied RESPONSE header and scopes off the JWT's DOMAIN_
+                // authority), so the stamp stays default-off until games decision
+                // 026's public-catalog brand filter lands.
                 return chain.filter(exchange);
             });
     }
 
     /**
-     * Drop any CLIENT-supplied {@code X-Domain} request header so it can never reach
-     * a downstream that would otherwise trust it as the gateway's validated brand.
+     * Make the gateway the SOLE authority on {@code X-Domain}: drop any
+     * CLIENT-supplied copy, then — only when {@link #forwardDomainHeader} is on —
+     * stamp the registry-validated brand this request's {@code Host} resolves to.
      *
-     * <p>Mirrors {@code ExternalAuthHeaderFilter.stripInbound}: the gateway is the
-     * sole authority on this header's value, so the inbound copy is dropped
-     * unconditionally, on EVERY path and for every principal (anonymous included),
-     * regardless of whether the gateway currently stamps a replacement. Returns the
-     * exchange UNCHANGED when the header is absent, so the overwhelmingly common
-     * case allocates no mutated exchange and the filter stays byte-identical to its
-     * previous behaviour for it.
+     * <p>Mirrors {@code ExternalAuthHeaderFilter.stripInbound} + stamp: the inbound
+     * copy is dropped unconditionally, on EVERY path and for every principal
+     * (anonymous included) and in BOTH flag states, so a downstream can never
+     * receive a caller-forged value — and the value that may replace it is computed
+     * here from {@link #targetDomain}, never read back off the request.
+     *
+     * <p><b>Order matters inside the mutation.</b> The remove runs BEFORE the add on
+     * the same {@link HttpHeaders}, so a request arriving with
+     * {@code X-Domain: brandy} leaves carrying exactly one {@code X-Domain} — the
+     * gateway's — and not two values, where a downstream reading {@code getFirst}
+     * could pick up the attacker's.
+     *
+     * <p>With the stamp OFF and no inbound header this returns the exchange
+     * UNCHANGED, so the overwhelmingly common request allocates no mutated exchange
+     * and the filter is byte-identical to its pre-flag behaviour.
      */
-    private static ServerWebExchange stripClientDomainHeader(ServerWebExchange exchange) {
+    private ServerWebExchange normalizeDomainHeader(ServerWebExchange exchange) {
         // get(), not getFirst(): presence is the question, not the value. getFirst
         // answers null for BOTH "absent" and "present with an empty value list", so
         // it would leave that second case forwarded; get() only answers null when
         // the header name is genuinely absent. Case-insensitivity comes from
         // HttpHeaders itself, so `x-domain:` is caught by the same lookup.
-        if (exchange.getRequest().getHeaders().get(X_DOMAIN) == null) return exchange;
+        boolean inboundPresent = exchange.getRequest().getHeaders().get(X_DOMAIN) != null;
+        if (!inboundPresent && !forwardDomainHeader) return exchange;
+        // The SAME derivation the route-access decision uses below, so a downstream
+        // scoping on this header and this gateway gating on the table can never
+        // disagree about which brand the request is for.
+        final String stamped = forwardDomainHeader ? targetDomain(exchange) : null;
         return exchange.mutate()
-                .request(b -> b.headers(h -> h.remove(X_DOMAIN)))
+                .request(b -> b.headers(h -> {
+                    h.remove(X_DOMAIN);
+                    if (stamped != null) h.add(X_DOMAIN, stamped);
+                }))
                 .build();
     }
 

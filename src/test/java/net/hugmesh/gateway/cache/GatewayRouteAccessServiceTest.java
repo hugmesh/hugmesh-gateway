@@ -924,6 +924,115 @@ class GatewayRouteAccessServiceTest {
         }
     }
 
+    // ── The edge-AI /v1 space in the LOCAL-DEV Postgres seed (issue #4, TODO 1) ──
+
+    /** Every {@code ('gw', 'pattern', 'ROLE_x', true|false)} tuple in the
+     *  local-dev seed, as the Rules the gateway would hold once that Postgres
+     *  loads. Parsing (rather than substring-matching) is what lets this test
+     *  assert DECISIONS on the dev stack's own rows instead of merely asserting
+     *  the text is present. */
+    private static List<Rule> composeSeedRulesFor(String gateway) {
+        Path seedSql = Path.of("compose", "route-access-seed.sql");
+        assertThat(seedSql)
+            .as("the compose Postgres seed must exist (test runs from the module basedir)")
+            .exists();
+        String sql;
+        try {
+            sql = Files.readString(seedSql, StandardCharsets.UTF_8);
+        } catch (IOException e) {
+            throw new UncheckedIOException("could not read " + seedSql, e);
+        }
+        // Strip `--` comments first: the file documents patterns like /v1/** in
+        // prose, and a comment must never be mistaken for a row.
+        String rows = sql.replaceAll("(?m)--[^\n]*", "");
+        var out = new ArrayList<Rule>();
+        var m = Pattern.compile("\\('([^']+)',\\s*'([^']*)',\\s*'([^']+)',\\s*(true|false)\\)")
+                .matcher(rows);
+        while (m.find()) {
+            if (!gateway.equals(m.group(1))) continue;
+            out.add(new Rule(null, m.group(1), m.group(2), m.group(3), null,
+                    Boolean.parseBoolean(m.group(4)), null, false));
+        }
+        return out;
+    }
+
+    @Test
+    void composeSeed_beGateway_edgeAiV1Space_resolvesAndIsFloorGated() {
+        // THIRD LEG OF THE DUAL-WRITE (issue #4, TODO 1). The cluster Postgres seed
+        // and the baked CanonicalSeed both carry the three be-gateway /v1 rows; the
+        // local-dev seed compose.yaml mounts into docker-entrypoint-initdb.d carried
+        // NONE. When that Postgres loads, its rows REPLACE the baked seed wholesale
+        // (loadFromPostgres wins over CanonicalSeed), so the dev stack reproduced
+        // exactly the hole the baked rows closed: /v1/** matched nothing, decide()
+        // answered NO_RULE, and NO_RULE FORWARDS.
+        //
+        // POSTURE THE NEW ROWS CREATE (all three are ROLE_USER capability floors,
+        // strictly closing — nothing reachable to a ROLE_USER stops being reachable):
+        //   • no authorities                -> DENY (governed-but-ungranted, was NO_RULE->forward)
+        //   • authenticated, no ROLE_USER   -> DENY (a ROLE_MATRIX-only account, was forwarded)
+        //   • ROLE_USER                     -> ALLOW (unchanged outcome, now governed)
+        //   • ROLE_ADMIN / ROLE_SUPERADMIN  -> unchanged: the FILTER's own bypasses
+        //     short-circuit before decide() is ever called, which is why no
+        //     ROLE_ADMIN row is paired onto a capability floor.
+        var rules = composeSeedRulesFor("hugmesh-be-gateway");
+        assertThat(rules)
+            .as("parse sanity: the be-gateway block must yield a plausible row count "
+                    + "(a broken regex would make every assertion below vacuous)")
+            .hasSizeGreaterThan(20);
+        var s = new GatewayRouteAccessService(null, null, "hugmesh-be-gateway", true, false, null);
+        s.primeForTest(rules);
+
+        List<String> v1Paths = List.of(
+                "/v1",                          // the ai.<domain> catchall root
+                "/v1/chat/completions",         // edge-ai (Ollama OpenAI-compatible API)
+                "/v1/embeddings",
+                "/v1/models",
+                "/v1/analyze/image/classify",   // edge-ai-analysis
+                "/v1/analyze/content/moderate",
+                "/v1/synthesize",               // edge-ai-tts
+                "/v1/synthesize/stream");
+        for (String path : v1Paths) {
+            assertThat(s.decide(path, "default", List.of(), List.of()))
+                .as("%s must RESOLVE to a rule in the dev seed (never NO_RULE)", path)
+                .isEqualTo(Decision.DENY);
+            assertThat(s.decide(path, "default", List.of("u1"), List.of("ROLE_MATRIX")))
+                .as("a ROLE_MATRIX-only account must not reach %s", path)
+                .isEqualTo(Decision.DENY);
+            assertThat(s.decide(path, "default", List.of("u1"), List.of("ROLE_USER")))
+                .as("the ROLE_USER floor must still reach %s", path)
+                .isEqualTo(Decision.ALLOW);
+        }
+        // The mastodon /api/v1/** rows live in a DIFFERENT path space and must not be
+        // touched by the new base row (a /v1/** that also swallowed /api/v1 would
+        // silently re-floor the homeserver API onto ROLE_USER).
+        assertThat(s.decide("/api/v1/timelines/home", "default", List.of("u1"), List.of("ROLE_USER")))
+            .as("/api/v1/** stays ROLE_MASTODON-gated; the /v1 base must not widen onto it")
+            .isEqualTo(Decision.DENY);
+    }
+
+    @Test
+    void composeSeed_beGatewayV1Rows_matchTheBakedCanonicalSeedExactly() {
+        // DUAL-WRITE PARITY, both directions: the dev Postgres and the baked fallback
+        // must agree on pattern, role AND allow for the whole /v1 space, or the dev
+        // stack and a datastore-unreachable production enforce different postures.
+        var composeV1 = composeSeedRulesFor("hugmesh-be-gateway").stream()
+                .filter(r -> r.urlPattern().startsWith("/v1"))
+                .map(r -> r.urlPattern() + "|" + r.role() + "|" + r.allow())
+                .sorted().toList();
+        var bakedV1 = CanonicalSeed.forGateway("hugmesh-be-gateway").stream()
+                .filter(r -> r.urlPattern().startsWith("/v1"))
+                .map(r -> r.urlPattern() + "|" + r.role() + "|" + r.allow())
+                .sorted().toList();
+        assertThat(bakedV1)
+            .as("guard sanity: CanonicalSeed must still carry the three /v1 rows")
+            .containsExactly("/v1/**|ROLE_USER|true",
+                             "/v1/analyze/**|ROLE_USER|true",
+                             "/v1/synthesize/**|ROLE_USER|true");
+        assertThat(composeV1)
+            .as("compose/route-access-seed.sql must mirror the baked /v1 floor exactly")
+            .isEqualTo(bakedV1);
+    }
+
     // ── Image-builder console split (build-distribution) ──────────────────────
 
     @Test

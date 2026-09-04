@@ -48,6 +48,9 @@ class HugMeshGatewayApplicationTests {
     @Autowired
     GatewayProperties gatewayProperties;
 
+    @Autowired
+    net.hugmesh.gateway.filter.GatewayRouteAccessFilter routeAccessFilter;
+
     @Test
     void contextLoads() {
     }
@@ -62,6 +65,37 @@ class HugMeshGatewayApplicationTests {
      * a future revert to the stale prefix fails the build instead of failing OPEN at
      * runtime (request 404s past the route-access gate with no downstream).
      */
+    /**
+     * SHIPS-DARK GUARD for the {@code X-Domain} producer (issue #4, TODO 2).
+     * Every other test builds the filter by hand, so none of them can see the
+     * value {@code application.yml} actually ships. This one drives the REAL
+     * container-wired bean — {@code app.domain-header.forward} bound from the
+     * shipped default, with no property override here — and asserts both halves
+     * of the posture at once: a client-supplied {@code X-Domain} is STRIPPED, and
+     * nothing is stamped in its place. Flipping the shipped default to
+     * {@code true} (in {@code application.yml} or in the {@code @Value} fallback)
+     * fails HERE, which is the only place it can be caught, because no downstream
+     * consumer of the header exists yet.
+     */
+    @Test
+    void xDomainProducerShipsInert_butTheInboundStripIsLive() {
+        var req = org.springframework.mock.http.server.reactive.MockServerHttpRequest
+                .get("/api/anything").header("X-Domain", "brandy").build();
+        var exchange = org.springframework.mock.web.server.MockServerWebExchange.from(req);
+        var seen = new java.util.concurrent.atomic.AtomicReference<
+                org.springframework.web.server.ServerWebExchange>();
+        routeAccessFilter.filter(exchange, ex -> {
+            seen.set(ex);
+            return reactor.core.publisher.Mono.empty();
+        }).block();
+        assertThat(seen.get())
+                .as("an anonymous request must still forward")
+                .isNotNull();
+        assertThat(seen.get().getRequest().getHeaders().get("X-Domain"))
+                .as("inbound strip live + outbound stamp dark on the SHIPPED defaults")
+                .isNull();
+    }
+
     @Test
     void staticRoutesBindUnderScg5WebfluxNamespace() {
         assertThat(gatewayProperties.getRoutes())

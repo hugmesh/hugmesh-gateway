@@ -523,6 +523,20 @@ convention: ✅ shipped = on main · 🚧 in-flight = on an open branch/PR · �
   the BFF-driven MFA challenge (stamps `mfa_satisfied` into the opaque session),
   generalized step-up (sudo / SSH-via-UI / remote-install / superadmin ops), and
   the remaining 9-PR plan — cross-repo, tracked in [`ROADMAP.md`](ROADMAP.md).
+- ✅ **`X-Domain` brand header — strip is live, producer merged INERT (issue #4).**
+  The gateway drops a client-supplied inbound `X-Domain` unconditionally, on every
+  path and for every principal, so no downstream can be handed a forged brand. The
+  OUTBOUND stamp of the Host-derived, registry-validated brand is merged but gated
+  on `app.domain-header.forward` (`APP_DOMAIN_HEADER_FORWARD`), **default false**,
+  because nothing in the org reads the header yet. 🚧 **Still owed (cross-repo):**
+  the consumer — hugmesh-games decision 026 leaves public/anonymous catalog reads
+  global precisely because "a brand-partitioned *public* catalog needs the gateway
+  to forward a Host-derived brand (e.g. `X-Domain`), which it does not today". When
+  that read lands, an operator flips this one property; the stamp is deliberately
+  applied at the TOP of `GatewayRouteAccessFilter` (with the strip), not at the
+  route-access decision, because anonymous requests — the ones the consumer scopes —
+  short-circuit long before that decision. Flipping it changes no authorization
+  decision here: `route_access` remains the enforcement surface.
 - 🔭 **Workload Console gating** (admin-bff work is 🚧 in-flight).
   The federated pod-manage/log/exec admin-ui surfaces will need new gateway
   route-access rows / authority gates: superadmin cross-cluster, admins
