@@ -461,21 +461,51 @@ forward-looking, not-yet-started work in *Roadmap* below):
   `src/main/java/net/hugmesh/gateway/filter/BffJwtExchangeWebFilter.java` and the
   `(v-d) THE BOUND ITSELF` block of `BffJwtExchangeWebFilterTest`.
 
-  A follow-up 26-mutation battery (2026-09-04) re-measured those guards and found **four**
-  survivors: two real gaps (both closed here), one already held by the ordering Spring Boot
-  slices but not by the filter unit suites the battery ran, and one *equivalent* mutant. The
-  two real gaps were the constructor's **`@Value` fallbacks**, which nothing pinned, so
-  widening the `cache-ttl-max-ms` fallback to 600 s or reverting `cache-ttl-ms` to the old
-  60 s left every filter suite green — those fallbacks are the effective defaults for any
-  deployment that *replaces* the config locations rather than layering over the packaged
-  `application.yml`, and a deleted YAML key drops straight onto them. All three statements
-  of each number (the named constant, the `@Value` fallback, the wired YAML default) are
-  now required to agree, read through the runtime annotation rather than the source text.
-  The filter's own `getOrder()` is also pinned in the unit suite now, not only in the
-  ordering Spring Boot slices. 22 of 26 went red before this change and **25 of 26** go red
-  after; the one remaining survivor is an *equivalent* mutant (dropping the guard on the
-  cache **read** while the **write** guard keeps the map provably empty) and is recorded as
-  such in the test.
+  A follow-up 26-mutation battery (2026-09-04) re-measured those guards and found the
+  constructor's **`@Value` fallbacks** unpinned: widening the `cache-ttl-max-ms` fallback to
+  600 s, reverting `cache-ttl-ms` to the old 60 s, or widening the `cache-max-size` fallback
+  to 1000000 each left every filter suite green (all three re-measured independently on the
+  pre-change tree `34c8945`). Those fallbacks are the effective defaults for any deployment
+  that *replaces* the config locations rather than layering over the packaged
+  `application.yml`, and a deleted YAML key drops straight onto them. All three statements of
+  each number (the named constant, the `@Value` fallback, the wired YAML default) are now
+  required to agree, read through the runtime annotation rather than the source text. The
+  filter's own `getOrder()` is also pinned in the unit suite now, not only in the ordering
+  Spring Boot slices. The one survivor left in that battery is an *equivalent* mutant
+  (dropping the guard on the cache **read** while the **write** guard keeps the map provably
+  empty) and is recorded as such in the test.
+
+  Two review corrections to the paragraph above, both now held by tests (2026-09-04):
+
+  * That battery **under-counted its own survivors** — it reported the `cache-max-size`
+    fallback as guarded when it was not (re-measured: green on `34c8945`, red on this tree),
+    so the round closed three real gaps, not two. Treat any battery's survivor list as a
+    lower bound on the gaps, never as an exhaustive one.
+  * Hand-listing the knobs to pin left the two the round did not touch —
+    `internal-token-header` and `request-timeout-ms` — walking straight through a second,
+    independent battery (both measured green). The guard is now **enumerative**: it reads
+    every `@Value` the constructor declares under `hugmesh.gateway.bff-exchange.` and
+    requires each to be wired in `application.yml` with an identical default, so the next
+    knob is pinned the moment it is added. `request-timeout-ms` gained the YAML key it never
+    had. Drift on `internal-token-header` fails CLOSED (admin-bff's `InternalTokenWebFilter`
+    rejects the swap), so it is an availability defect, not a bypass.
+
+  One further correction of **fact**: the ceiling fallback is *not* the window a config-less
+  deployment runs with. The effective window is `min(cache-ttl-ms, cache-ttl-max-ms)`, i.e.
+  the **5 s** TTL fallback; widening the ceiling alone changes nothing until `cache-ttl-ms`
+  is separately raised. The ceiling is the widest window any `cache-ttl-ms` override can buy
+  — which is why it is worth pinning — and both halves of that statement are now
+  asserted rather than narrated.
+
+  **Greppability (fixed here, worth knowing about).** `BffJwtExchangeWebFilter.java` carried
+  two **raw NUL bytes** inside its `REJECT` sentinel literal from the round that introduced
+  it. That compiles to the same constant, but `file(1)` classified the source as `data` and
+  GNU `grep` then skipped the whole file while exiting 1 — indistinguishable from
+  "searched it, found nothing". A repo-wide `grep -rn 'request-timeout-ms'` during review
+  reported the key absent from the entire repository while it sat in that constructor. The
+  literal is now written as the `\0` escape (identical compiled value) and
+  `SourceIsPlainTextGuardTest` fails on any NUL byte anywhere under `src/`, because a guard
+  or audit that cannot see its subject reports PASS.
 
   **Still open — proactive invalidation on suspension (needs a cross-repo push).**
   The remaining half of the design question ("should a suspension event evict cached

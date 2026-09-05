@@ -488,9 +488,11 @@ class BffJwtExchangeWebFilterTest {
                 .load("application.yml", new org.springframework.core.io.ClassPathResource("application.yml"));
 
         assertThat(valueFallback("hugmesh.gateway.bff-exchange.cache-ttl-max-ms"))
-                .as("the ceiling fallback IS the widest suspension-staleness window a "
-                        + "config-less deployment can have — it must equal the documented "
-                        + "constant and the wired YAML default")
+                .as("the ceiling fallback bounds every cache-ttl-ms override, so it is the "
+                        + "widest suspension-staleness window this deployment can be configured "
+                        + "into — it must equal the documented constant and the wired YAML "
+                        + "default. (It is NOT the config-less window: that one is "
+                        + "min(cache-ttl-ms, ceiling) = the TTL fallback, pinned below.)")
                 .isNotNull()
                 .isEqualTo(String.valueOf(BffJwtExchangeWebFilter.DEFAULT_CACHE_TTL_CEILING_MS))
                 .isEqualTo(yamlFallback(sources, "hugmesh.gateway.bff-exchange.cache-ttl-max-ms"));
@@ -507,6 +509,73 @@ class BffJwtExchangeWebFilterTest {
                 .isNotNull()
                 .isEqualTo("10000")
                 .isEqualTo(yamlFallback(sources, "hugmesh.gateway.bff-exchange.cache-max-size"));
+    }
+
+    @Test
+    void everyBffExchangeValueFallback_isWiredInYamlWithTheSameDefault()
+            throws java.io.IOException {
+        // COMPLETENESS, not a third hand-listed knob: the three-statement principle above
+        // was applied to the three knobs this round happened to touch, which left the two
+        // it did not — `internal-token-header` and `request-timeout-ms` — unpinned, and an
+        // independent battery walked straight through both (measured 2026-09-04: mutating
+        // the internal-token-header fallback to X-Bogus-Header, and the request-timeout-ms
+        // fallback to 300000, BOTH left this suite and the cookie suite green). Enumerating
+        // the constructor's annotations instead of naming knobs means the NEXT knob is
+        // pinned the moment it is added, with no test edit to remember.
+        //
+        // Drift on `internal-token-header` fails CLOSED, not open — admin-bff's
+        // InternalTokenWebFilter rejects a swap that arrives under the wrong header name, so
+        // every exchange 401s — but a whole-mesh SSO outage whose only symptom is "all
+        // sessions 401" is exactly the failure this filter's guards exist to catch early.
+        var sources = new org.springframework.boot.env.YamlPropertySourceLoader()
+                .load("application.yml", new org.springframework.core.io.ClassPathResource("application.yml"));
+        var fallbacks = bffExchangeValueFallbacks();
+
+        assertThat(fallbacks.keySet())
+                .as("the constructor's own knobs must all be discovered — an empty or "
+                        + "shrunken set would make this guard pass vacuously")
+                .contains(BFF_EXCHANGE + "internal-token-header",
+                        BFF_EXCHANGE + "internal-token",
+                        BFF_EXCHANGE + "cache-ttl-ms",
+                        BFF_EXCHANGE + "cache-ttl-max-ms",
+                        BFF_EXCHANGE + "cache-max-size",
+                        BFF_EXCHANGE + "request-timeout-ms");
+
+        fallbacks.forEach((key, fallback) -> {
+            assertThat(yamlValue(sources, key))
+                    .as("%s carries an @Value fallback (%s) but is NOT wired in the packaged "
+                            + "application.yml — the fallback is then the ONLY statement of the "
+                            + "default and nothing reviews a change to it", key, fallback)
+                    .isNotNull();
+            assertThat(yamlFallback(sources, key))
+                    .as("%s: the @Value fallback and the wired YAML default must agree, so "
+                            + "deleting the YAML key cannot silently move the effective default",
+                            key)
+                    .isEqualTo(fallback);
+        });
+    }
+
+    @Test
+    void configLessWindow_isTheTtlFallback_andTheCeilingBoundsEveryOverride() {
+        // The ceiling fallback is NOT what a config-less deployment gets: the effective
+        // window is min(cache-ttl-ms, cache-ttl-max-ms), i.e. the 5s TTL fallback. Widening
+        // the ceiling alone changes nothing until cache-ttl-ms is separately raised. Stated
+        // here because the review of the guard above described the ceiling as the config-less
+        // window, which overstates it by a factor of twelve — the guard is right, the
+        // narrative was not, and an over-claimed bound is how a real one stops being read.
+        long ttlFallback = Long.parseLong(valueFallback(BFF_EXCHANGE + "cache-ttl-ms"));
+        long ceilingFallback = Long.parseLong(valueFallback(BFF_EXCHANGE + "cache-ttl-max-ms"));
+        var stub = new StubExchange(n -> Mono.just(jsonResponse(HttpStatus.OK, "{\"bearer\":\"c\"}")));
+
+        assertThat(filter(stub, ttlFallback, ceilingFallback, 10_000).cacheTtlMillis())
+                .as("with NO property source the window is min(%d, %d) = the TTL fallback",
+                        ttlFallback, ceilingFallback)
+                .isEqualTo(ttlFallback)
+                .isEqualTo(5_000L);
+
+        assertThat(filter(stub, Long.MAX_VALUE, ceilingFallback, 10_000).cacheTtlMillis())
+                .as("no cache-ttl-ms override can buy a window wider than the ceiling")
+                .isEqualTo(ceilingFallback);
     }
 
     // ── (viii) ORDER — before Spring Security, one slot behind the cookie bridge ──
@@ -559,6 +628,45 @@ class BffJwtExchangeWebFilterTest {
                         + "fallbacks would be read arbitrarily", key)
                 .hasSizeLessThan(2);
         return found.isEmpty() ? null : found.iterator().next();
+    }
+
+    /** The filter's own property prefix — the namespace this suite pins end to end. */
+    private static final String BFF_EXCHANGE = "hugmesh.gateway.bff-exchange.";
+
+    /** Every {@code @Value} the filter's constructor(s) declare under {@link #BFF_EXCHANGE},
+     *  as key -> annotation fallback, read from the runtime annotations Spring itself reads.
+     *  A key declared twice with DIFFERENT fallbacks fails loudly (declared-constructor
+     *  order is unspecified, so one of them would otherwise be picked arbitrarily), and a
+     *  placeholder with no {@code :fallback} fails too — an absent property would then be
+     *  a startup failure, not a default, and this guard must not silently skip it. */
+    private static java.util.Map<String, String> bffExchangeValueFallbacks() {
+        var found = new java.util.TreeMap<String, java.util.LinkedHashSet<String>>();
+        for (java.lang.reflect.Constructor<?> ctor
+                : BffJwtExchangeWebFilter.class.getDeclaredConstructors()) {
+            for (java.lang.annotation.Annotation[] onParam : ctor.getParameterAnnotations()) {
+                for (java.lang.annotation.Annotation a : onParam) {
+                    if (!(a instanceof org.springframework.beans.factory.annotation.Value v)) continue;
+                    String raw = v.value();
+                    if (!raw.startsWith("${" + BFF_EXCHANGE) || !raw.endsWith("}")) continue;
+                    String body = raw.substring(2, raw.length() - 1);
+                    int colon = body.indexOf(':');
+                    assertThat(colon)
+                            .as("%s declares no :fallback — an absent property would fail "
+                                    + "startup rather than default, so it cannot be pinned", raw)
+                            .isPositive();
+                    found.computeIfAbsent(body.substring(0, colon),
+                            k -> new java.util.LinkedHashSet<>()).add(body.substring(colon + 1));
+                }
+            }
+        }
+        var out = new java.util.TreeMap<String, String>();
+        found.forEach((key, values) -> {
+            assertThat(values)
+                    .as("%s must have ONE @Value fallback across all constructors", key)
+                    .hasSize(1);
+            out.put(key, values.iterator().next());
+        });
+        return out;
     }
 
     /** The default baked into application.yml's {@code ${ENV_VAR:default}} placeholder for

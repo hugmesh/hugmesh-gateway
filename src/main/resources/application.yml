@@ -256,6 +256,12 @@ hugmesh:
       # drops TTL-elapsed entries first and otherwise declines to cache the new swap — it
       # still forwards, so the bound sheds cache, never authorization.
       cache-max-size: ${HUGMESH_GATEWAY_BFF_EXCHANGE_CACHE_MAX_SIZE:10000}
+      # Per-swap timeout on the admin-bff back-channel call. A timeout is a FAILED swap,
+      # so it fails CLOSED (401) and is never cached — raising this trades a slower 401
+      # for a longer hold on the request. Wired here (rather than left to the constructor's
+      # @Value fallback alone) so the packaged config states every knob of this filter and
+      # the drift guard can require all three statements of each default to agree.
+      request-timeout-ms: ${HUGMESH_GATEWAY_BFF_EXCHANGE_REQUEST_TIMEOUT_MS:3000}
   tls:
     key-store: ${HUGMESH_TLS_KEY_STORE:/stores/keystore.p12}
     key-store-type: ${HUGMESH_TLS_KEY_STORE_TYPE:PKCS12}
