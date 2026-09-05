@@ -1121,6 +1121,240 @@ class GatewayRouteAccessFilterTest {
             .isEqualTo("hugmesh-be-gateway:/api/reports/q3");
     }
 
+
+    // ── Outbound X-Domain stamp (issue #4, TODO 2 — the producer, SHIPPING INERT) ─
+    //
+    // app.domain-header.forward defaults FALSE, so every test above already proves
+    // the dark default (nothing stamped). These pin the OTHER state: with the flag
+    // on, the gateway stamps the Host-derived, registry-validated brand — the same
+    // value decide() is given — on EVERY path that forwards, and a client-supplied
+    // header is REPLACED, never merged. The consumer is still absent (games decision
+    // 026), so this stays opt-in; what it buys now is that the safe shape is the one
+    // in the tree, instead of a TODO inviting the stamp at the decision fall-through
+    // where every anonymous request would miss it.
+
+    /** Filter with the stamp ENABLED (5-arg ctor), single-issuer registry — so the
+     *  validated brand is the single-tenant {@code "default"}. */
+    private GatewayRouteAccessFilter stampingFilter() {
+        return new GatewayRouteAccessFilter(routeAccess,
+                new net.hugmesh.gateway.security.DomainRegistry("http://casdoor:8000", "", ""),
+                false, 600_000L, true);
+    }
+
+    /** As {@link #runCapturingForwarded} but against an explicitly supplied filter
+     *  and Host, returning the exchange the DOWNSTREAM saw. */
+    private static org.springframework.web.server.ServerWebExchange runCapturingForwarded(
+            GatewayRouteAccessFilter f, String path, String host,
+            String domainHeaderValue, AbstractAuthenticationToken auth) {
+        var builder = MockServerHttpRequest.get(path);
+        if (host != null) builder.header(org.springframework.http.HttpHeaders.HOST, host);
+        if (domainHeaderValue != null) builder.header("X-Domain", domainHeaderValue);
+        MockServerWebExchange mwex = MockServerWebExchange.from(builder.build());
+        var seen = new java.util.concurrent.atomic.AtomicReference<
+                org.springframework.web.server.ServerWebExchange>();
+        WebFilterChain capturing = ex -> { seen.set(ex); return Mono.empty(); };
+        if (auth == null) {
+            f.filter(mwex, capturing).block();
+        } else {
+            f.filter(new ExchangeWithPrincipal(mwex, auth), capturing).block();
+        }
+        return seen.get();
+    }
+
+    @Test
+    void stampOn_anonymousRequestCarriesTheValidatedBrand() {
+        // THE WHOLE POINT of the header: the consumer scopes ANONYMOUS public reads.
+        // The anonymous branch returns chain.filter() before the route-access
+        // decision, so a stamp written at the decision fall-through would be absent
+        // here — this test is what fails if someone moves it back down.
+        var fwd = runCapturingForwarded(stampingFilter(), "/api/games/catalog", null, null, null);
+        assertThat(fwd).as("anonymous request must still forward").isNotNull();
+        assertThat(fwd.getRequest().getHeaders().get("X-Domain"))
+            .as("anonymous traffic must carry the gateway's brand stamp")
+            .containsExactly("default");
+    }
+
+    @Test
+    void stampOn_forgedInboundIsReplaced_notMerged() {
+        // The security contract of the pair: strip THEN stamp, on the same headers,
+        // so a caller who forges X-Domain: brandy leaves with exactly ONE value —
+        // the gateway's. Two values would let a downstream reading getFirst() pick
+        // the attacker's.
+        when(routeAccess.decide(any(), any(), any(), any())).thenReturn(Decision.ALLOW);
+        Jwt userJwt = jwt("user-1", List.of(Map.of("name", "user")));
+        var fwd = runCapturingForwarded(
+                stampingFilter(), "/api/reports/q3", null, "brandy", authFor(userJwt));
+        assertThat(fwd.getRequest().getHeaders().get("X-Domain"))
+            .as("the forged value must be gone and exactly one gateway value present")
+            .containsExactly("default");
+    }
+
+    @Test
+    void stampOn_forgedInboundIsReplaced_evenInLowercaseSpelling() {
+        // HTTP header names are case-insensitive: `x-domain: brandy` must be removed
+        // by the same lookup, not left beside the stamped canonical spelling.
+        when(routeAccess.decide(any(), any(), any(), any())).thenReturn(Decision.ALLOW);
+        Jwt userJwt = jwt("user-1", List.of(Map.of("name", "user")));
+        var builder = MockServerHttpRequest.get("/api/reports/q3").header("x-domain", "brandy");
+        MockServerWebExchange mwex = MockServerWebExchange.from(builder.build());
+        var seen = new java.util.concurrent.atomic.AtomicReference<
+                org.springframework.web.server.ServerWebExchange>();
+        WebFilterChain capturing = ex -> { seen.set(ex); return Mono.empty(); };
+        stampingFilter().filter(new ExchangeWithPrincipal(mwex, authFor(userJwt)), capturing).block();
+        assertThat(seen.get().getRequest().getHeaders().get("X-Domain"))
+            .containsExactly("default");
+        assertThat(seen.get().getRequest().getHeaders().get("x-domain"))
+            .as("same header, case-insensitive lookup — one value, the gateway's")
+            .containsExactly("default");
+    }
+
+    @Test
+    void stampOn_privilegedBypassesAlsoCarryTheStamp() {
+        // Both bypasses reach chain.filter() on their own. A downstream that trusts
+        // the header's PRESENCE must not see it vanish for admins and superadmins.
+        Jwt adminJwt = jwt("admin-1", List.of(Map.of("name", "admin")));
+        var viaAdmin = runCapturingForwarded(
+                stampingFilter(), "/api/anything", null, "brandy", authFor(adminJwt, "ADMIN"));
+        assertThat(viaAdmin.getRequest().getHeaders().get("X-Domain")).containsExactly("default");
+        Mockito.verify(routeAccess, Mockito.never()).decide(any(), any(), any(), any());
+
+        Jwt saJwt = jwt("sa-1", List.of(Map.of("name", "superadmin")));
+        var viaSa = runCapturingForwarded(
+                stampingFilter(), "/api/admin/secrets", null, "brandy", authFor(saJwt, "SUPERADMIN"));
+        assertThat(viaSa.getRequest().getHeaders().get("X-Domain")).containsExactly("default");
+    }
+
+    @Test
+    void stampOn_valueIsTheRegistryResolvedBrand_fromHost_notTheInboundHeader() {
+        // Multi-brand: the stamp is the brand the registry maps this Host to, which
+        // is the SAME targetDomain decide() is given — so a downstream scoping on the
+        // header and the gateway gating on the table can never disagree. A forged
+        // inbound naming the OTHER brand does not influence it.
+        when(routeAccess.decide(any(), any(), any(), any())).thenReturn(Decision.ALLOW);
+        var multiBrandStamping = new GatewayRouteAccessFilter(
+                routeAccess, multiBrandRegistry(), false, 600_000L, true);
+        Jwt brandXJwt = jwt("user-x", List.of(Map.of("name", "user")), BRANDX_ISSUER);
+        var fwd = runCapturingForwarded(multiBrandStamping, "/api/games/catalog",
+                "api.brandx.tld", "brandy", authForDomain(brandXJwt, "brandx"));
+        assertThat(fwd.getRequest().getHeaders().get("X-Domain"))
+            .as("Host api.brandx.tld resolves to brandx; the forged 'brandy' is discarded")
+            .containsExactly("brandx");
+        var domainSeenByDecide = org.mockito.ArgumentCaptor.forClass(String.class);
+        Mockito.verify(routeAccess).decide(any(), domainSeenByDecide.capture(), any(), any());
+        assertThat(domainSeenByDecide.getValue())
+            .as("the stamped brand must be the very value the decision was made on")
+            .isEqualTo("brandx");
+    }
+
+    @Test
+    void stampOn_deniedRequestStillForwardsNothing() {
+        // The stamp must not become a way for a denied request to reach a downstream.
+        when(routeAccess.decide(any(), any(), any(), any())).thenReturn(Decision.DENY);
+        Jwt userJwt = jwt("user-1", List.of(Map.of("name", "user")));
+        var fwd = runCapturingForwarded(
+                stampingFilter(), "/api/reports/q3", null, "brandy", authFor(userJwt));
+        assertThat(fwd).as("DENY must not forward, stamped or not").isNull();
+    }
+
+    @Test
+    void stampOff_isTheDefault_andForwardsNoHeaderAtAll() {
+        // The dark default, asserted against the PRODUCTION property default rather
+        // than a hand-passed false: a filter built by the 2-arg ctor (which mirrors
+        // ${app.domain-header.forward:false}) stamps nothing on any branch.
+        when(routeAccess.decide(any(), any(), any(), any())).thenReturn(Decision.ALLOW);
+        Jwt userJwt = jwt("user-1", List.of(Map.of("name", "user")));
+        var authed = runCapturingForwarded(filter, "/api/reports/q3", null, null, authFor(userJwt));
+        assertThat(authed.getRequest().getHeaders().get("X-Domain"))
+            .as("stamp is OFF by default — no consumer exists yet")
+            .isNull();
+        var anon = runCapturingForwarded(filter, "/api/login", null, null, null);
+        assertThat(anon.getRequest().getHeaders().get("X-Domain")).isNull();
+    }
+
+    /**
+     * F1 GUARD (skeptic finding, round 3): pins the {@code @Value} PLACEHOLDER KEY
+     * itself, not just the filter's behaviour once a boolean has been handed to it.
+     *
+     * <p><b>The hole this closes.</b> Every ON-state test above builds the filter by
+     * hand through the 5-arg constructor, and the container-wired guard in
+     * {@code HugMeshGatewayApplicationTests} asserts only the OFF state — which
+     * passes whether or not {@code ${app.domain-header.forward:false}} resolves to
+     * anything at all. Measured on this branch: misspelling the key to
+     * {@code app.domain-headerz.forward} (fallback still {@code false}) left the
+     * FULL suite at 507 tests, 0 failures, BUILD SUCCESS — while
+     * {@code APP_DOMAIN_HEADER_FORWARD=true}, the operator lever README.md sells,
+     * would have done nothing, forever, with a green build.
+     *
+     * <p>These two drive the SAME chain the container uses — property ->
+     * placeholder -> field -> behaviour — with Spring doing the binding, so any
+     * break anywhere in it fails here in BOTH directions (a typo kills the ON test;
+     * a fallback flipped to {@code :true} kills the OFF test).
+     *
+     * <p>{@link ApplicationContextRunner} rather than a second {@code @SpringBootTest}:
+     * it is this repo's established pattern for exactly this
+     * ({@code BffJwtExchangeConfigTest}, {@code DownstreamMtlsConfigTest}), it is the
+     * shape commit {@code 6033cb9} used to close the identical unguarded-{@code @Value}
+     * finding on the sibling {@code BffJwtExchangeWebFilter}, and it keeps the
+     * per-PR gate from paying for another full application context.
+     */
+    @org.junit.jupiter.api.Nested
+    class XDomainStampPropertyBinding {
+
+        /** Minimal context: the real filter registered as a COMPONENT (so Spring
+         *  instantiates it through its {@code @Autowired} constructor and resolves the
+         *  placeholder), plus its two collaborators. The route-access service is
+         *  wired {@code enabled=false} so its {@code @PostConstruct} no-ops — these
+         *  requests are anonymous and never reach {@code decide()} anyway. */
+        private final org.springframework.boot.test.context.runner.ApplicationContextRunner runner =
+                new org.springframework.boot.test.context.runner.ApplicationContextRunner()
+                        .withBean(GatewayRouteAccessService.class, () -> new GatewayRouteAccessService(
+                                null, null, "hugmesh-be-gateway", false, false, null))
+                        .withBean(net.hugmesh.gateway.security.DomainRegistry.class,
+                                () -> new net.hugmesh.gateway.security.DomainRegistry(
+                                        "http://casdoor:8000", "", ""))
+                        .withUserConfiguration(GatewayRouteAccessFilter.class);
+
+        /** Runs one anonymous request carrying a forged {@code X-Domain} through the
+         *  CONTAINER-BUILT filter and returns what the downstream saw. */
+        private List<String> forwardedXDomain(
+                org.springframework.context.ApplicationContext ctx) {
+            var f = ctx.getBean(GatewayRouteAccessFilter.class);
+            var req = MockServerHttpRequest.get("/api/anything")
+                    .header("X-Domain", "brandy").build();
+            var exchange = MockServerWebExchange.from(req);
+            var seen = new java.util.concurrent.atomic.AtomicReference<
+                    org.springframework.web.server.ServerWebExchange>();
+            f.filter(exchange, ex -> { seen.set(ex); return Mono.empty(); }).block();
+            assertThat(seen.get()).as("an anonymous request must still forward").isNotNull();
+            return seen.get().getRequest().getHeaders().get("X-Domain");
+        }
+
+        @Test
+        void propertyUnset_theBoundFilterStampsNothing_andStillStripsTheForgedValue() {
+            runner.run(ctx -> {
+                assertThat(ctx).hasNotFailed();
+                assertThat(forwardedXDomain(ctx))
+                    .as("the @Value FALLBACK is the effective default wherever "
+                            + "application.yml is replaced rather than layered over "
+                            + "(SPRING_CONFIG_LOCATION at a mounted ConfigMap): it must "
+                            + "be false, and the strip must run regardless")
+                    .isNull();
+            });
+        }
+
+        @Test
+        void propertySetTrue_theBoundFilterStampsTheValidatedBrand() {
+            runner.withPropertyValues("app.domain-header.forward=true").run(ctx -> {
+                assertThat(ctx).hasNotFailed();
+                assertThat(forwardedXDomain(ctx))
+                    .as("app.domain-header.forward=true must actually BIND through the "
+                            + "placeholder: exactly one value, the gateway's "
+                            + "single-tenant brand, and the forged 'brandy' gone")
+                    .containsExactly("default");
+            });
+        }
+    }
+
     /** Populates getPrincipal() on a MockServerWebExchange (the mock leaves it
      *  an empty Mono otherwise). Mirrors the helper in ResourceAccessFilterTest. */
     static class ExchangeWithPrincipal extends org.springframework.web.server.ServerWebExchangeDecorator {

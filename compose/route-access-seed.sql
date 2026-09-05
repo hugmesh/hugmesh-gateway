@@ -96,6 +96,45 @@ INSERT INTO gateway_route_access (gateway, url_pattern, role, allow) VALUES
   ('hugmesh-be-gateway',   '/bff/superadmin/**',        'ROLE_SUPERADMIN',    true),  -- superadmin infra console (tailnet)
   ('hugmesh-be-gateway',   '/api/**',               'ROLE_USER',     true),
   ('hugmesh-be-gateway',   '/api/admin/**',         'ROLE_ADMIN',    true),
+  -- ── games portal + games namespace admin API (be-gateway) ──────────────────
+  -- SECOND dual-write gap on this same file (skeptic finding F2, round 3). The
+  -- cluster Postgres seed and the baked CanonicalSeed.be() both carry these four
+  -- rows; this local-dev copy carried NONE, and the /v1 fix alone would have left
+  -- the file still drifting. It matters MORE than the /v1 gap it sits beside:
+  -- no be-gateway pattern in this file is /games-prefixed, so /games/api/admin/**
+  -- matched nothing, decide() returned NO_RULE, and NO_RULE FORWARDS — an ADMIN
+  -- surface left ungoverned by this layer in any stack pointed at this seed,
+  -- versus a ROLE_USER capability floor for /v1.
+  -- ROLE_GAMES is the games-access capability; ROLE_ADMIN and ROLE_MOD are PAIRED
+  -- supersets here (the converter does NOT auto-grant ROLE_GAMES to them), which
+  -- is why the games floor carries an admin pairing where the /v1 floors above do
+  -- not. The namespace admin API is LONGER, so longest-pattern-match keeps it on
+  -- ROLE_GAMES_ADMIN rather than widening it to the portal floor.
+  ('hugmesh-be-gateway',   '/games/api/admin/**',   'ROLE_GAMES_ADMIN', true),  -- games namespace admin API (wins, longer)
+  ('hugmesh-be-gateway',   '/games/**',             'ROLE_GAMES',       true),  -- games portal floor (games-access)
+  ('hugmesh-be-gateway',   '/games/**',             'ROLE_ADMIN',       true),  -- (admins superset)
+  ('hugmesh-be-gateway',   '/games/**',             'ROLE_MOD',         true),  -- (mods superset)
+  -- ── edge-AI /v1 path space (be-gateway) ────────────────────────────────────
+  -- A path space DISTINCT from /api/** above, fronted by three OPTIONAL slugs:
+  -- edge-ai-tts (/v1/synthesize/**, matrix-ui voice synthesis), edge-ai-analysis
+  -- (/v1/analyze/**) and edge-ai itself — whose be-gateway route is a Host
+  -- predicate (ai.<domain>) with NO Path predicate, i.e. the /v1 CATCHALL.
+  -- WITHOUT the /v1/** base row every other /v1 path (/v1/chat/completions,
+  -- /v1/embeddings, /v1/models) matched no rule here, decide() returned NO_RULE,
+  -- and NO_RULE FORWARDS: in this dev stack the model API was governed only by
+  -- the coarse authenticated() floor, so a principal holding no ROLE_USER at all
+  -- (a ROLE_MATRIX-only account) reached it.
+  -- Each row is a plain ROLE_USER capability floor — no ROLE_ADMIN pairing (the
+  -- converter does not auto-grant ROLE_USER to admins, who reach it via the
+  -- gateway's own bypass). The two sub-path rows are LONGER than the base, so
+  -- longest-pattern-match keeps them deciding their own paths rather than the
+  -- base widening them.
+  -- Third leg of the dual-write trio, byte-for-byte: the cluster seed
+  -- (route-access/initdb/20-schema.sql) and the baked CanonicalSeed.be() rows
+  -- already carry all three; this local-dev copy carried none (issue #4).
+  ('hugmesh-be-gateway',   '/v1/analyze/**',        'ROLE_USER',     true),  -- edge-ai-analysis verdict API
+  ('hugmesh-be-gateway',   '/v1/synthesize/**',     'ROLE_USER',     true),  -- edge-ai-tts voice synthesis API
+  ('hugmesh-be-gateway',   '/v1/**',                'ROLE_USER',     true),  -- edge-ai OpenAI-compatible inference API
   -- fe-gateway (hugmesh.net host + MFE + /bff proxy)
   ('hugmesh-fe-gateway',   '/',                     'PUBLIC',        true),
   -- Social SPA shells congruent with the be platform gates.

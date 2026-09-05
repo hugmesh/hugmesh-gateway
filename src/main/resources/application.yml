@@ -87,6 +87,21 @@ app:
     # is NOT exempt). SEPARATE sub-flag from `enabled`; default false. Cold-start
     # (route-access not yet primed) fails closed with a 503 for these principals.
     enforce-privileged-floor: ${APP_MFA_ENFORCE_PRIVILEGED_FLOOR:false}
+  # ── X-Domain brand stamp (issue #4, TODO 2) — SHIPS INERT, DEFAULT OFF ───────
+  # The gateway ALWAYS strips a client-supplied inbound `X-Domain`; that is
+  # unconditional and NOT gated by this flag, so no downstream can ever be handed a
+  # forged brand. This flag governs only whether the gateway then STAMPS the
+  # Host-derived, registry-validated target brand onto the forwarded request
+  # ("default" on a single-tenant cluster).
+  # Leave it FALSE until a downstream actually reads the header: nothing in the org
+  # does today, and the gateway also fronts third-party servers (tuwunel, Akkoma,
+  # Ollama, Casdoor). The intended first consumer is hugmesh-games decision 026's
+  # public/anonymous catalog partitioning, which is blocked on exactly this value.
+  # Flipping it changes NO authorization decision here — route_access remains the
+  # enforcement surface; it only makes the validated brand legible behind the
+  # gateway.
+  domain-header:
+    forward: ${APP_DOMAIN_HEADER_FORWARD:false}
   revocation:
     enabled: true
     refresh-interval-ms: 5000   # 5 s — fast enough that a block
