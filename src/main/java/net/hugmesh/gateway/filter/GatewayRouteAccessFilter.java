@@ -174,8 +174,16 @@ public class GatewayRouteAccessFilter implements WebFilter, Ordered {
     }
 
     /** Pre-{@code domain-header} 4-arg convenience (stamp OFF) — keeps the D8 test
-     *  call sites compiling and pins that the new flag's default leaves the filter
-     *  unchanged. */
+     *  call sites compiling by delegating with {@code forwardDomainHeader=false}.
+     *  <p>It is a COMPILE-COMPATIBILITY shim and nothing more: an earlier version of
+     *  this comment claimed it "pins that the new flag's default leaves the filter
+     *  unchanged", and a mutation battery refuted that — making this delegate
+     *  {@code true} instead SURVIVES the suite, because the D8 tests reached through
+     *  it assert MFA behaviour and never inspect {@code X-Domain}. The dark default
+     *  is pinned by {@code HugMeshGatewayApplicationTests
+     *  #xDomainProducerShipsInert_butTheInboundStripIsLive} (the wired bean on the
+     *  shipped properties) and by {@code GatewayRouteAccessFilterTest
+     *  #stampOff_isTheDefault_andForwardsNoHeaderAtAll}. */
     public GatewayRouteAccessFilter(GatewayRouteAccessService routeAccess,
                                     DomainRegistry domainRegistry,
                                     boolean enforcePrivilegedFloor,

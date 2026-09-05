@@ -1033,6 +1033,91 @@ class GatewayRouteAccessServiceTest {
             .isEqualTo(bakedV1);
     }
 
+    @Test
+    void composeSeed_beGateway_wholeBlockMatchesTheBakedCanonicalSeedExactly() {
+        // F2 (skeptic finding, round 3). The /v1 parity test above filters on
+        // startsWith("/v1"), so it is BLIND to drift anywhere else in the file — and
+        // there was some: after the /v1 rows landed, the compose be-gateway block was
+        // still a strict SUBSET of the baked seed, missing all four /games rows
+        // (/games/api/admin/** -> ROLE_GAMES_ADMIN, and the /games/** floor paired to
+        // ROLE_GAMES + ROLE_ADMIN + ROLE_MOD). No be-gateway pattern in the file was
+        // /games-prefixed, so by the very argument that motivated the /v1 fix —
+        // loadFromPostgres REPLACES the baked seed wholesale — a stack pointed at this
+        // seed left /games/api/admin/** at NO_RULE, and NO_RULE FORWARDS. An ADMIN
+        // surface ungoverned by this layer is a strictly worse posture than the
+        // ROLE_USER capability floor the /v1 gap cost.
+        //
+        // This guard is deliberately UNFILTERED: set equality over the entire
+        // be-gateway block, both directions, on (pattern, role, allow). Any future row
+        // added to CanonicalSeed.be() and not to the dev seed — or vice versa — fails
+        // here rather than in a stack six months later. There is no allowlist because
+        // there is currently nothing deliberately dev-only in the be block; if a row
+        // ever needs to be one-sided, add it to an explicit exception set HERE, with
+        // the reason, rather than re-narrowing the filter.
+        var compose = composeSeedRulesFor("hugmesh-be-gateway").stream()
+                .map(r -> r.urlPattern() + "|" + r.role() + "|" + r.allow())
+                .distinct().sorted().toList();
+        var baked = CanonicalSeed.forGateway("hugmesh-be-gateway").stream()
+                .map(r -> r.urlPattern() + "|" + r.role() + "|" + r.allow())
+                .distinct().sorted().toList();
+        assertThat(baked)
+            .as("guard sanity: a broken CanonicalSeed lookup would make this vacuous")
+            .hasSizeGreaterThan(20);
+        assertThat(compose)
+            .as("compose/route-access-seed.sql and CanonicalSeed.be() are a DUAL WRITE: "
+                    + "the whole be-gateway block must agree on pattern, role and allow")
+            .isEqualTo(baked);
+    }
+
+    @Test
+    void composeSeed_beGateway_gamesSurface_resolves_andTheAdminApiIsNotUngoverned() {
+        // The behavioural half of F2, phrased the way the /v1 test is: it is not
+        // enough that the rows are PRESENT, the dev seed must actually decide these
+        // paths. Before the four rows landed every assertion below answered NO_RULE
+        // (-> forward), including the namespace ADMIN API.
+        var rules = composeSeedRulesFor("hugmesh-be-gateway");
+        var s = new GatewayRouteAccessService(null, null, "hugmesh-be-gateway", true, false, null);
+        s.primeForTest(rules);
+
+        // Portal floor: governed, and the capability + its two supersets reach it.
+        for (String path : List.of("/games", "/games/", "/games/catalog", "/games/play/xyz")) {
+            assertThat(s.decide(path, "default", List.of(), List.of()))
+                .as("%s must RESOLVE to a rule in the dev seed (never NO_RULE)", path)
+                .isEqualTo(Decision.DENY);
+            assertThat(s.decide(path, "default", List.of("u1"), List.of("ROLE_USER")))
+                .as("a plain ROLE_USER holds no games-access capability")
+                .isEqualTo(Decision.DENY);
+            assertThat(s.decide(path, "default", List.of("u1"), List.of("ROLE_GAMES")))
+                .isEqualTo(Decision.ALLOW);
+            assertThat(s.decide(path, "default", List.of("u1"), List.of("ROLE_ADMIN")))
+                .isEqualTo(Decision.ALLOW);
+            assertThat(s.decide(path, "default", List.of("u1"), List.of("ROLE_MOD")))
+                .isEqualTo(Decision.ALLOW);
+        }
+
+        // Namespace admin API: LONGER pattern wins, so the portal floor must NOT
+        // widen onto it. This is the row whose absence left an admin surface at
+        // NO_RULE -> forward.
+        String adminApi = "/games/api/admin/purge";
+        assertThat(s.decide(adminApi, "default", List.of(), List.of()))
+            .as("the games namespace admin API must be GOVERNED, not NO_RULE")
+            .isEqualTo(Decision.DENY);
+        for (String role : List.of("ROLE_USER", "ROLE_GAMES", "ROLE_ADMIN", "ROLE_MOD")) {
+            assertThat(s.decide(adminApi, "default", List.of("u1"), List.of(role)))
+                .as("%s must NOT reach the games namespace admin API by longest-match", role)
+                .isEqualTo(Decision.DENY);
+        }
+        assertThat(s.decide(adminApi, "default", List.of("u1"), List.of("ROLE_GAMES_ADMIN")))
+            .isEqualTo(Decision.ALLOW);
+
+        // The /games rows must not leak onto the neighbouring /api/** floor.
+        assertThat(s.decide("/api/reports/q3", "default", List.of("u1"), List.of("ROLE_GAMES")))
+            .as("ROLE_GAMES alone must not reach the hugmesh-apis floor")
+            .isEqualTo(Decision.DENY);
+        assertThat(s.decide("/api/reports/q3", "default", List.of("u1"), List.of("ROLE_USER")))
+            .isEqualTo(Decision.ALLOW);
+    }
+
     // ── Image-builder console split (build-distribution) ──────────────────────
 
     @Test

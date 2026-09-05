@@ -96,6 +96,24 @@ INSERT INTO gateway_route_access (gateway, url_pattern, role, allow) VALUES
   ('hugmesh-be-gateway',   '/bff/superadmin/**',        'ROLE_SUPERADMIN',    true),  -- superadmin infra console (tailnet)
   ('hugmesh-be-gateway',   '/api/**',               'ROLE_USER',     true),
   ('hugmesh-be-gateway',   '/api/admin/**',         'ROLE_ADMIN',    true),
+  -- ── games portal + games namespace admin API (be-gateway) ──────────────────
+  -- SECOND dual-write gap on this same file (skeptic finding F2, round 3). The
+  -- cluster Postgres seed and the baked CanonicalSeed.be() both carry these four
+  -- rows; this local-dev copy carried NONE, and the /v1 fix alone would have left
+  -- the file still drifting. It matters MORE than the /v1 gap it sits beside:
+  -- no be-gateway pattern in this file is /games-prefixed, so /games/api/admin/**
+  -- matched nothing, decide() returned NO_RULE, and NO_RULE FORWARDS — an ADMIN
+  -- surface left ungoverned by this layer in any stack pointed at this seed,
+  -- versus a ROLE_USER capability floor for /v1.
+  -- ROLE_GAMES is the games-access capability; ROLE_ADMIN and ROLE_MOD are PAIRED
+  -- supersets here (the converter does NOT auto-grant ROLE_GAMES to them), which
+  -- is why the games floor carries an admin pairing where the /v1 floors above do
+  -- not. The namespace admin API is LONGER, so longest-pattern-match keeps it on
+  -- ROLE_GAMES_ADMIN rather than widening it to the portal floor.
+  ('hugmesh-be-gateway',   '/games/api/admin/**',   'ROLE_GAMES_ADMIN', true),  -- games namespace admin API (wins, longer)
+  ('hugmesh-be-gateway',   '/games/**',             'ROLE_GAMES',       true),  -- games portal floor (games-access)
+  ('hugmesh-be-gateway',   '/games/**',             'ROLE_ADMIN',       true),  -- (admins superset)
+  ('hugmesh-be-gateway',   '/games/**',             'ROLE_MOD',         true),  -- (mods superset)
   -- ── edge-AI /v1 path space (be-gateway) ────────────────────────────────────
   -- A path space DISTINCT from /api/** above, fronted by three OPTIONAL slugs:
   -- edge-ai-tts (/v1/synthesize/**, matrix-ui voice synthesis), edge-ai-analysis

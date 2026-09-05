@@ -1271,6 +1271,90 @@ class GatewayRouteAccessFilterTest {
         assertThat(anon.getRequest().getHeaders().get("X-Domain")).isNull();
     }
 
+    /**
+     * F1 GUARD (skeptic finding, round 3): pins the {@code @Value} PLACEHOLDER KEY
+     * itself, not just the filter's behaviour once a boolean has been handed to it.
+     *
+     * <p><b>The hole this closes.</b> Every ON-state test above builds the filter by
+     * hand through the 5-arg constructor, and the container-wired guard in
+     * {@code HugMeshGatewayApplicationTests} asserts only the OFF state — which
+     * passes whether or not {@code ${app.domain-header.forward:false}} resolves to
+     * anything at all. Measured on this branch: misspelling the key to
+     * {@code app.domain-headerz.forward} (fallback still {@code false}) left the
+     * FULL suite at 507 tests, 0 failures, BUILD SUCCESS — while
+     * {@code APP_DOMAIN_HEADER_FORWARD=true}, the operator lever README.md sells,
+     * would have done nothing, forever, with a green build.
+     *
+     * <p>These two drive the SAME chain the container uses — property ->
+     * placeholder -> field -> behaviour — with Spring doing the binding, so any
+     * break anywhere in it fails here in BOTH directions (a typo kills the ON test;
+     * a fallback flipped to {@code :true} kills the OFF test).
+     *
+     * <p>{@link ApplicationContextRunner} rather than a second {@code @SpringBootTest}:
+     * it is this repo's established pattern for exactly this
+     * ({@code BffJwtExchangeConfigTest}, {@code DownstreamMtlsConfigTest}), it is the
+     * shape commit {@code 6033cb9} used to close the identical unguarded-{@code @Value}
+     * finding on the sibling {@code BffJwtExchangeWebFilter}, and it keeps the
+     * per-PR gate from paying for another full application context.
+     */
+    @org.junit.jupiter.api.Nested
+    class XDomainStampPropertyBinding {
+
+        /** Minimal context: the real filter registered as a COMPONENT (so Spring
+         *  instantiates it through its {@code @Autowired} constructor and resolves the
+         *  placeholder), plus its two collaborators. The route-access service is
+         *  wired {@code enabled=false} so its {@code @PostConstruct} no-ops — these
+         *  requests are anonymous and never reach {@code decide()} anyway. */
+        private final org.springframework.boot.test.context.runner.ApplicationContextRunner runner =
+                new org.springframework.boot.test.context.runner.ApplicationContextRunner()
+                        .withBean(GatewayRouteAccessService.class, () -> new GatewayRouteAccessService(
+                                null, null, "hugmesh-be-gateway", false, false, null))
+                        .withBean(net.hugmesh.gateway.security.DomainRegistry.class,
+                                () -> new net.hugmesh.gateway.security.DomainRegistry(
+                                        "http://casdoor:8000", "", ""))
+                        .withUserConfiguration(GatewayRouteAccessFilter.class);
+
+        /** Runs one anonymous request carrying a forged {@code X-Domain} through the
+         *  CONTAINER-BUILT filter and returns what the downstream saw. */
+        private List<String> forwardedXDomain(
+                org.springframework.context.ApplicationContext ctx) {
+            var f = ctx.getBean(GatewayRouteAccessFilter.class);
+            var req = MockServerHttpRequest.get("/api/anything")
+                    .header("X-Domain", "brandy").build();
+            var exchange = MockServerWebExchange.from(req);
+            var seen = new java.util.concurrent.atomic.AtomicReference<
+                    org.springframework.web.server.ServerWebExchange>();
+            f.filter(exchange, ex -> { seen.set(ex); return Mono.empty(); }).block();
+            assertThat(seen.get()).as("an anonymous request must still forward").isNotNull();
+            return seen.get().getRequest().getHeaders().get("X-Domain");
+        }
+
+        @Test
+        void propertyUnset_theBoundFilterStampsNothing_andStillStripsTheForgedValue() {
+            runner.run(ctx -> {
+                assertThat(ctx).hasNotFailed();
+                assertThat(forwardedXDomain(ctx))
+                    .as("the @Value FALLBACK is the effective default wherever "
+                            + "application.yml is replaced rather than layered over "
+                            + "(SPRING_CONFIG_LOCATION at a mounted ConfigMap): it must "
+                            + "be false, and the strip must run regardless")
+                    .isNull();
+            });
+        }
+
+        @Test
+        void propertySetTrue_theBoundFilterStampsTheValidatedBrand() {
+            runner.withPropertyValues("app.domain-header.forward=true").run(ctx -> {
+                assertThat(ctx).hasNotFailed();
+                assertThat(forwardedXDomain(ctx))
+                    .as("app.domain-header.forward=true must actually BIND through the "
+                            + "placeholder: exactly one value, the gateway's "
+                            + "single-tenant brand, and the forged 'brandy' gone")
+                    .containsExactly("default");
+            });
+        }
+    }
+
     /** Populates getPrincipal() on a MockServerWebExchange (the mock leaves it
      *  an empty Mono otherwise). Mirrors the helper in ResourceAccessFilterTest. */
     static class ExchangeWithPrincipal extends org.springframework.web.server.ServerWebExchangeDecorator {
