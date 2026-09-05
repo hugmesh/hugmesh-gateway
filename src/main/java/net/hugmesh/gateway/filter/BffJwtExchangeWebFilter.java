@@ -248,8 +248,17 @@ public class BffJwtExchangeWebFilter implements WebFilter, Ordered {
     }
 
     /** Sentinel emitted by the swap stage when the exchange failed or yielded no JWT.
-     *  Distinct from any real custody JWT (a JWT never equals this literal). */
-    private static final String REJECT = " bff-exchange-reject ";
+     *  Distinct from any real custody JWT (a JWT never equals this literal).
+     *
+     *  <p>The NUL delimiters MUST stay written as the {@code \0} escape, never as raw
+     *  0x00 bytes in this file. They were raw until 2026-09-04, which made {@code file(1)}
+     *  classify this source as {@code data} and made a plain {@code grep} SKIP the whole
+     *  file while exiting 1 &mdash; so any audit, CI guard or reviewer grepping for a
+     *  constant, property key or annotation in the platform's fail-closed swap filter got
+     *  a clean "not found" over a file it never actually read (it hid
+     *  {@code request-timeout-ms} from a repo-wide search during review). The compiled
+     *  constant is byte-identical either way; only the source encoding changed. */
+    private static final String REJECT = "\0bff-exchange-reject\0";
 
     /** Call the admin-bff custody-swap endpoint; emit the custody JWT on 2xx with a
      *  non-blank {@code bearer}, otherwise error (4xx/5xx) or complete empty (blank). */
