@@ -376,7 +376,8 @@ unscoped/`default`-owned key remains writable single-tenant (back-compat).
   backends enforce `client-auth=need`, the gateway presents a client cert chaining
   to the cluster CA and validates the backend cert on the **proxy leg only**.
   Enabled with `HUGMESH_GATEWAY_MTLS_ENABLED=true`; store passwords bind from
-  `hugmesh.tls.*` (written by the chart's keystore initContainer, never in git).
+  `hugmesh.tls.*` (written by the chart's keystore initContainer into the in-pod
+  `/stores/application.properties`, never in git).
 - **PKI cert-chain builder** — this repo is the canonical home of the platform
   cert-chain builder: [`scripts/pki/build-chained-cert.sh`](scripts/pki/build-chained-cert.sh)
   mints leaf/intermediate certs off a shared root (one root, two intermediates,
@@ -522,23 +523,19 @@ forward-looking, not-yet-started work in *Roadmap* below):
   single-repo change. Until then the honest posture statement is: TTL-bounded where
   revocation is off, already-immediate where revocation is on, and `cache-ttl-ms=0`
   for anyone who wants neither.
-- **Downstream mTLS's store passwords (`hugmesh.tls.*`) may never actually bind
-  in-cluster — unverified against the chart.** `application-tls.properties` (the
-  file the chart's `build-keystore` initContainer writes the real generated PKCS12
-  passwords into) is a Spring Boot **profile-specific** document; an
-  additional-location directory only auto-loads it when a profile literally named
-  `tls` is active, and this repo has no evidence either way of that being wired on
-  the be/fe-gateway deployment configs that set `HUGMESH_GATEWAY_MTLS_ENABLED=true`. If
-  it isn't, `DownstreamMtlsProperties`' passwords stay at their empty default and
-  `KeyStore.load(...)` (`DownstreamMtlsConfig.load`) throws on the real
-  (non-passwordless) store, failing the pod to start. This is the same root-cause
-  family as an already-documented, still-open fleet-wide gap on the `server.ssl.*`
-  binding used by several BFFs sharing the identical `build-keystore` +
-  `application-tls.properties` pattern — flagged here as a TODO
-  (`src/main/java/net/hugmesh/gateway/config/DownstreamMtlsProperties.java`)
-  rather than guess-fixed, since the actual fix is chart-side (a different repo)
-  and needs a human decision on the mechanism (rename the emitted file, activate a
-  `tls` profile, or bridge the property) that a single-repo pass can't make safely.
+- **Downstream mTLS has never been booted live with `HUGMESH_GATEWAY_MTLS_ENABLED=true`
+  on record.** The password *binding* itself is verified (hugmesh-gateway#1): the
+  chart's `build-keystore` initContainer emits a plain `/stores/application.properties`,
+  which Spring loads unconditionally from `SPRING_CONFIG_ADDITIONAL_LOCATION`. The
+  earlier `application-tls.properties` was profile-named and silently never loaded —
+  the chart activates only `routes`, never `tls` — so `hugmesh.tls.*` fell through to
+  the packaged `${HUGMESH_TLS_KEY_STORE_PASSWORD:}` (empty) and `KeyStore.load(...)`
+  could not open the real PKCS12 store. Fixed chart-side in hugmesh-generator
+  `39f9fce4` (2026-07-17; the same emitted-file block is in all nine BFF/API
+  manifests), re-verified against the chart 2026-09-09. What remains unproven is a real
+  in-cluster pod boot with the flag on. `DownstreamMtlsConfig.load` fails fast and
+  never falls back to plaintext, so a wrong store or password is a crash-loop, not a
+  silent downgrade.
 
 ## Roadmap
 

@@ -207,9 +207,13 @@ server:
 # OUTBOUND client. Browsers / Cloudflare reach the gateway WITHOUT a client cert.
 #
 # The store coordinates bind from hugmesh.tls.* — the SAME keys the chart's
-# build-keystore initContainer writes into /stores/application-tls.properties
-# (loaded via SPRING_CONFIG_ADDITIONAL_LOCATION) — so the passwords are never in
-# git or the pod spec. Defaults below match the chart's /stores layout.
+# build-keystore initContainer writes into /stores/application.properties, a PLAIN
+# properties file that Spring loads UNCONDITIONALLY from
+# SPRING_CONFIG_ADDITIONAL_LOCATION. It is deliberately NOT the profile-named
+# application-tls.properties it once was: that only loads under an active `tls`
+# profile, the chart activates only `routes`, and so the passwords silently never
+# bound (hugmesh-gateway#1; fixed chart-side in hugmesh-generator 39f9fce4). The
+# passwords are never in git or the pod spec. Defaults below match /stores.
 hugmesh:
   gateway:
     mtls:

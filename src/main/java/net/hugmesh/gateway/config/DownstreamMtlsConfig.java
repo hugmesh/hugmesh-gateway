@@ -46,10 +46,11 @@ import java.security.KeyStore;
  * NOT asked for a client cert — the inbound server side is untouched here.
  *
  * <p>The store passwords are NOT in git or the pod spec: the initContainer writes
- * them into {@code /stores/application-tls.properties} (loaded via
- * {@code SPRING_CONFIG_ADDITIONAL_LOCATION=file:/stores/}) as
- * {@code hugmesh.tls.key-store-password} / {@code hugmesh.tls.trust-store-password},
- * which bind to the fields below.
+ * them into {@code /stores/application.properties} (a PLAIN properties file, loaded
+ * unconditionally via {@code SPRING_CONFIG_ADDITIONAL_LOCATION=file:/config/,file:/stores/}
+ * — see {@link DownstreamMtlsProperties} for why it must NOT be a profile-named
+ * {@code application-tls.properties}) as {@code hugmesh.tls.key-store-password} /
+ * {@code hugmesh.tls.trust-store-password}, which bind to the fields below.
  */
 @Configuration
 @ConditionalOnProperty(name = "hugmesh.gateway.mtls.enabled", havingValue = "true")
