@@ -7,31 +7,33 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  * (gateway -> API) mutual TLS — see {@link DownstreamMtlsConfig}.
  *
  * <p>Bound from {@code hugmesh.tls.*}, the SAME keys the chart's
- * {@code build-keystore} initContainer writes into
- * {@code /stores/application-tls.properties} (loaded via
- * {@code SPRING_CONFIG_ADDITIONAL_LOCATION=file:/stores/}). The passwords are
- * therefore NEVER in git or the pod spec — only in the in-pod tmpfs file.
+ * {@code build-keystore} initContainer writes into the in-pod tmpfs file
+ * {@code /stores/application.properties} (loaded via
+ * {@code SPRING_CONFIG_ADDITIONAL_LOCATION=file:/config/,file:/stores/}). The
+ * passwords are therefore NEVER in git or the pod spec.
  *
  * <p>Defaults match the chart's {@code /stores} layout so a stock in-cluster pod
  * needs no extra config beyond {@code hugmesh.gateway.mtls.enabled=true}; the
  * passwords default empty (a passwordless PKCS12 still loads).
  *
- * <p>TODO: {@code application-tls.properties} is a Spring Boot PROFILE-SPECIFIC
- * document ({@code application-<profile>}) — an additional-location directory only
- * auto-loads it when a profile literally named {@code tls} is ACTIVE, which merely
- * adding it as a search directory does not do. This is the same fleet-wide gap
- * already found (and, as of this writing, still unfixed pending a chart-side design
- * decision) for the {@code server.ssl.*} binding on other Spring services sharing
- * this exact {@code build-keystore} + {@code application-tls.properties} pattern.
- * Unverified here whether the chart activates a {@code tls} profile for this
- * gateway's pods — if it does not, the real random password the initContainer
- * generates never binds and {@link #keyStorePassword}/{@link #trustStorePassword}
- * stay at their empty default, so {@code KeyStore.load(...)} in
- * {@link DownstreamMtlsConfig#load} throws on the real (non-passwordless) PKCS12
- * store and the pod fails to start whenever {@code hugmesh.gateway.mtls.enabled=true}
- * (documented on {@link DownstreamMtlsConfig} as already set on the be/fe-gateway
- * ArgoCD apps). Fail-fast rather than silently-wrong, but still worth confirming
- * against the chart before relying on downstream mTLS in production.
+ * <p><b>Why the emitted file is a plain {@code application.properties}, not the
+ * profile-named {@code application-tls.properties} it once was</b>
+ * (hugmesh/hugmesh-gateway#1). An additional-location DIRECTORY only auto-loads
+ * {@code application-<name>.properties} when a profile literally named {@code <name>}
+ * is ACTIVE, and the chart activates only {@code routes} — so the original file was
+ * silently never loaded, {@link #keyStorePassword}/{@link #trustStorePassword} fell
+ * through to the packaged {@code application.yml}'s
+ * {@code ${HUGMESH_TLS_KEY_STORE_PASSWORD:}} (empty), and {@code KeyStore.load(...)}
+ * in {@link DownstreamMtlsConfig#load} could not open the real PKCS12 store. Fixed
+ * chart-side in hugmesh-generator commit {@code 39f9fce4} (2026-07-17; the identical
+ * emitted-file block now sits in all nine BFF/API deployment manifests too): a plain
+ * {@code application.properties} loads UNCONDITIONALLY from the additional location,
+ * needs no profile, and shares no keys with the {@code /config/} route table, so it
+ * shadows nothing. Re-verified against the chart's
+ * {@code charts/hugmesh-gateway/templates/deployment.yaml} ({@code FILENAME IS
+ * LOAD-BEARING} block) on 2026-09-09. A live in-cluster boot with mTLS ON is still not
+ * on record; the fail-fast in {@link DownstreamMtlsConfig#load} remains the backstop
+ * (a wrong password is a crash-loop, never a silent plaintext downgrade).
  */
 @ConfigurationProperties(prefix = "hugmesh.tls")
 public class DownstreamMtlsProperties {
