@@ -54,12 +54,20 @@ import java.util.concurrent.ConcurrentHashMap;
  * must not pin a session to 401 for the rest of the TTL, and an attacker cannot poison the
  * cache by forcing a failure.
  *
- * <p><b>The TTL IS the suspension-bypass window.</b> admin-bff's {@code /session/exchange}
- * carries the fail-closed suspension gate (a suspended/banned account's swap is refused
- * 403) — but a CACHE HIT skips that round-trip, so a session suspended AFTER its swap was
- * cached keeps authorizing until the entry expires. The TTL therefore bounds the staleness
- * of a just-suspended session, so the default is a small {@code 5000}ms (≈ the cluster's
- * revocation poll cadence) rather than the old 60s, which left a full minute of bypass.
+ * <p><b>The TTL IS the suspension-bypass window — and the shipped default is ZERO.</b>
+ * admin-bff's {@code /session/exchange} carries the fail-closed suspension gate (a
+ * suspended/banned account's swap is refused 403) — but a CACHE HIT skips that round-trip,
+ * so a session suspended AFTER its swap was cached keeps authorizing until the entry
+ * expires. The TTL therefore bounds the staleness of a just-suspended session. Since
+ * 2026-09-16 (operator decision on hugmesh-gateway#2, "B: zero window now") the default
+ * {@code cache-ttl-ms} is {@link #DEFAULT_CACHE_TTL_MS} = {@code 0}: the positive cache is
+ * OFF, every {@code bff_} request round-trips to admin-bff's exchange gate, and a
+ * suspension takes effect on the very next request. The cost is one in-cluster swap call
+ * per {@code bff_}-bearing request (header-carried, or cookie-carried via
+ * {@link BffCookieToBearerWebFilter}); native-JWT and anonymous traffic never touches the
+ * exchange and is unaffected. The previous default was {@code 5000}ms (≈ the cluster's
+ * revocation poll cadence), itself down from an original 60s; a deployment that accepts a
+ * bounded window may opt back in with a positive {@code cache-ttl-ms}.
  *
  * <p><b>The bound itself is configurable and stated at startup.</b> The effective TTL is
  * {@code min(cache-ttl-ms, cache-ttl-max-ms)}, where {@code cache-ttl-max-ms} is the
@@ -70,10 +78,10 @@ import java.util.concurrent.ConcurrentHashMap;
  * the configured AND effective values (previously silent — an operator asking for ten
  * minutes just got sixty seconds, with nothing saying so), and a {@code cache-ttl-max-ms}
  * raised above the documented default warns that the bypass window has been widened.
- * Set {@code cache-ttl-ms} to {@code 0} (or any non-positive value) to DISABLE the
- * positive cache entirely — every request then re-consults the admin-bff exchange gate,
- * giving a ZERO suspension-bypass window at the cost of one in-cluster swap call per
- * request (ban-critical deployments). A non-positive {@code cache-ttl-max-ms} means the
+ * A {@code cache-ttl-ms} of {@code 0} (the shipped default) or any non-positive value
+ * DISABLES the positive cache entirely — every request then re-consults the admin-bff
+ * exchange gate, giving a ZERO suspension-bypass window at the cost of one in-cluster swap
+ * call per request. A non-positive {@code cache-ttl-max-ms} means the
  * same thing (a maximum lifetime of zero admits no entry) and is the fail-CLOSED reading:
  * a misconfigured ceiling can only ever TIGHTEN the window, never widen it. When the cache
  * is off it is never read OR written — the map stays empty.
@@ -114,6 +122,22 @@ public class BffJwtExchangeWebFilter implements WebFilter, Ordered {
     private static final String EXCHANGE_PATH = "/bff/internal/session/exchange";
 
     /**
+     * Shipped default for {@code hugmesh.gateway.bff-exchange.cache-ttl-ms}: {@code 0},
+     * i.e. the positive-swap cache is OFF and every {@code bff_} request re-consults
+     * admin-bff's exchange gate (zero suspension-bypass window). Set on 2026-09-16 by
+     * operator decision on hugmesh-gateway#2 ("B: zero window now"); the proactive
+     * admin-bff → gateway eviction push (option A) is a post-launch build.
+     *
+     * <p>This constant is a PIN, not an operative default: no production code reads it
+     * (javadoc and tests only — same pattern as {@link #DEFAULT_CACHE_TTL_CEILING_MS}).
+     * The two places the number actually takes effect are the {@code @Value} fallback on
+     * the constructor and the wired {@code application.yml} default; all three are held
+     * equal by {@code BffJwtExchangeWebFilterTest}, which goes red if ANY of them drifts
+     * back to {@code 5000} (or to any positive value) on its own.
+     */
+    static final long DEFAULT_CACHE_TTL_MS = 0L;
+
+    /**
      * Documented default for {@code hugmesh.gateway.bff-exchange.cache-ttl-max-ms} — the
      * hard ceiling the configured {@code cache-ttl-ms} is clamped to, and therefore the
      * WIDEST suspension-staleness window a default deployment can have. It was an
@@ -150,7 +174,7 @@ public class BffJwtExchangeWebFilter implements WebFilter, Ordered {
             @Value("${hugmesh.gateway.bff-exchange.internal-token-header:X-Internal-Token}")
                     String internalTokenHeader,
             @Value("${hugmesh.gateway.bff-exchange.internal-token:}") String internalToken,
-            @Value("${hugmesh.gateway.bff-exchange.cache-ttl-ms:5000}") long cacheTtlMillis,
+            @Value("${hugmesh.gateway.bff-exchange.cache-ttl-ms:0}") long cacheTtlMillis,
             @Value("${hugmesh.gateway.bff-exchange.cache-ttl-max-ms:60000}") long cacheTtlCeilingMillis,
             @Value("${hugmesh.gateway.bff-exchange.cache-max-size:10000}") int cacheMaxSize,
             @Value("${hugmesh.gateway.bff-exchange.request-timeout-ms:3000}") long requestTimeoutMillis) {
@@ -167,7 +191,9 @@ public class BffJwtExchangeWebFilter implements WebFilter, Ordered {
         //     fail-CLOSED one — a misconfigured ceiling can never WIDEN the window;
         //   * otherwise min(configured, ceiling) so a misconfiguration cannot cache a swap
         //     (and thus stale a just-suspended session) for longer than the ceiling allows.
-        // The default (5s, on the @Value above) matches the cluster's revocation poll cadence.
+        // The default (0 on the @Value above = DEFAULT_CACHE_TTL_MS) is the cache-OFF posture
+        // (hugmesh-gateway#2, 2026-09-16); the earlier 5s matched the cluster's revocation
+        // poll cadence and is now an opt-in, not the default.
         this.cacheTtlCeilingMillis = cacheTtlCeilingMillis;
         long effectiveTtlMillis = Math.min(cacheTtlMillis, cacheTtlCeilingMillis);
         this.cacheEnabled = effectiveTtlMillis > 0;

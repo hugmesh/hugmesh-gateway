@@ -229,7 +229,7 @@ dual token source. See *Request pipeline* above.
 | **Token source** | `Authorization: Bearer bff_…` only | `Authorization: Bearer bff_…` **or** the `bff_session` cookie (so cookie-mode UIs work) |
 | **Order** | `HIGHEST_PRECEDENCE + 5` — **pre-security**, before `WebFilterChainProxy(-100)`, reads/rewrites only the raw header | `HIGHEST_PRECEDENCE + 50` — also before the OAuth2 `BearerTokenAuthenticationWebFilter`, populates the context before it runs |
 | **Authorities** | inherited from the swapped-in JWT via `CasdoorAuthorities` (identical to a native JWT) | mapped from the introspect response body: `ROLE_<UPPER>` per role + always-on `ROLE_USER` floor + `MFA_SATISFIED` when `mfaSatisfied`; an **incomplete-registration** account is capped to `ROLE_USER` only |
-| **Fail-closed** | any exchange failure (non-2xx / timeout / empty body) ⇒ **401**, the raw `bff_` is **never** forwarded; positive swaps cached on `sha256(bff_)` (TTL-bounded, default 5s, clamped to the configurable `cache-ttl-max-ms` ceiling, default 60s; `cache-max-size` bounds the entry count). Suspension is enforced **admin-bff-side** on every non-cached exchange call (a suspended/banned account's swap is refused); a cache hit skips that round-trip, so the TTL is the suspension-staleness window (PR #68) — set `cache-ttl-ms<=0` for a zero-bypass-window, per-request-consult posture. | BFF 5xx/unreachable ⇒ **503** `session_backend_unavailable`; `status: suspended/banned` ⇒ **403** `X-BFF-Denied`; BFF 401 ⇒ pass-through unauthenticated (the `authenticated()` floor then 401s protected paths) |
+| **Fail-closed** | any exchange failure (non-2xx / timeout / empty body) ⇒ **401**, the raw `bff_` is **never** forwarded; positive swaps *may* be cached on `sha256(bff_)`, but the cache is **OFF by default** since 2026-09-16 (`cache-ttl-ms` default **0** — operator decision on #2, "zero window now"): every `bff_` request round-trips to admin-bff. A deployment that opts in with a positive `cache-ttl-ms` gets a window clamped to the configurable `cache-ttl-max-ms` ceiling (default 60s; `cache-max-size` bounds the entry count). Suspension is enforced **admin-bff-side** on every non-cached exchange call (a suspended/banned account's swap is refused); a cache hit skips that round-trip, so any positive TTL is the suspension-staleness window (PR #68) — the shipped `0` is the zero-bypass-window, per-request-consult posture. | BFF 5xx/unreachable ⇒ **503** `session_backend_unavailable`; `status: suspended/banned` ⇒ **403** `X-BFF-Denied`; BFF 401 ⇒ pass-through unauthenticated (the `authenticated()` floor then 401s protected paths) |
 
 `BffJwtExchangeWebFilter` also seeds a PUBLIC `/bff/login` route-access row
 (via `CanonicalSeed`) so the anonymous native-login credential POST reaches user-bff
@@ -440,12 +440,23 @@ CronJob or UI trigger.
 Concrete, currently-shipped-but-incomplete items verified in code (as opposed to the
 forward-looking, not-yet-started work in *Roadmap* below):
 
-- **`BffJwtExchangeWebFilter`'s positive-swap cache is a bounded suspension-staleness
-  window, not a full bypass** — suspension is enforced admin-bff-side on every
-  non-cached exchange call, but a cache hit skips that round-trip, so a session
-  suspended after its swap was cached keeps authorizing until the cache entry
-  expires. The window is bounded on three axes, all configurable and all now held in
-  place by tests: `cache-ttl-ms` (default 5s) is clamped to `cache-ttl-max-ms`
+- **`BffJwtExchangeWebFilter`'s positive-swap cache is OFF by default (zero window)
+  since 2026-09-16; when opted into, it is a bounded suspension-staleness window, not a
+  full bypass** — suspension is enforced admin-bff-side on every non-cached exchange
+  call, but a cache hit skips that round-trip, so a session suspended after its swap
+  was cached keeps authorizing until the cache entry expires. Operator decision on #2
+  ("B: zero window now"): the shipped `cache-ttl-ms` default is **0**, so every `bff_`
+  request round-trips to admin-bff and a suspension is enforced on the very next
+  request. The cost is one in-cluster swap call per `bff_`-bearing request on the
+  fe-gateway — as of 2026-09-16 the only tier the mesh generator turns the exchange on
+  for (`hugmesh-generator` `specs/cluster/apps/20-gateway-fe.yaml`,
+  `HUGMESH_GATEWAY_BFF_EXCHANGE_ENABLED: "true"`; the be-gateway app declares no
+  bff-exchange block), which is a deployment fact owned by *that* repo and can change
+  there without this README knowing. Native-JWT and anonymous traffic is untouched on
+  every tier. The proactive admin-bff → gateway eviction push (option A on #2) is a
+  post-launch build. For a deployment that opts into a positive TTL, the window is
+  bounded on three axes, all configurable and all held in place by tests:
+  `cache-ttl-ms` (was 5s by default until 2026-09-16, now 0) is clamped to `cache-ttl-max-ms`
   (default 60s — the widest window this deployment tolerates), `cache-max-size`
   (default 10000, floored at 1) bounds the entry count, and a non-positive value of
   *either* TTL knob disables the cache outright for a zero-window posture. A clamp
@@ -493,7 +504,8 @@ forward-looking, not-yet-started work in *Roadmap* below):
 
   One further correction of **fact**: the ceiling fallback is *not* the window a config-less
   deployment runs with. The effective window is `min(cache-ttl-ms, cache-ttl-max-ms)`, i.e.
-  the **5 s** TTL fallback; widening the ceiling alone changes nothing until `cache-ttl-ms`
+  the TTL fallback — **0 since 2026-09-16** (it was 5 s), so a config-less deployment runs
+  with the cache OFF; widening the ceiling alone changes nothing until `cache-ttl-ms`
   is separately raised. The ceiling is the widest window any `cache-ttl-ms` override can buy
   — which is why it is worth pinning — and both halves of that statement are now
   asserted rather than narrated.
@@ -520,9 +532,10 @@ forward-looking, not-yet-started work in *Roadmap* below):
   that actually closes the window in a revocation-less deployment is a **push from
   admin-bff** (an authenticated internal call telling the gateway to drop a specific
   cached swap), which is a new cross-repo contract and a human call, not a
-  single-repo change. Until then the honest posture statement is: TTL-bounded where
-  revocation is off, already-immediate where revocation is on, and `cache-ttl-ms=0`
-  for anyone who wants neither.
+  single-repo change. Until then the honest posture statement is: **zero-window by
+  default** (`cache-ttl-ms=0` is the shipped default since 2026-09-16 — every `bff_`
+  request round-trips), already-immediate where revocation is on, and TTL-bounded only
+  for a deployment that opts into a positive `cache-ttl-ms`.
 - **Downstream mTLS has never been booted live with `HUGMESH_GATEWAY_MTLS_ENABLED=true`
   on record.** The password *binding* itself is verified (hugmesh-gateway#1): the
   chart's `build-keystore` initContainer emits a plain `/stores/application.properties`,

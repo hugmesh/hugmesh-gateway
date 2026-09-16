@@ -314,21 +314,32 @@ class BffJwtExchangeWebFilterTest {
     // ── (v-c) the EFFECTIVE wired default — guards Java/YAML drift ────────────────
 
     @Test
-    void applicationYml_cacheTtlDefault_is5000_notTheOld60s_suspensionWindow() throws java.io.IOException {
-        // The constructor's @Value(":5000") fallback is DEAD while application.yml supplies the
-        // key, so the operative default is whatever the YAML pins. This test fails if the YAML
-        // default drifts back to 60000 (or anything but 5000) — which would silently reopen the
-        // full-minute suspension-bypass window the security fix exists to close. The other cache
-        // tests pass cacheTtlMs straight to the constructor and CANNOT catch this.
+    void applicationYml_cacheTtlDefault_is0_cacheOff_notThe5sOr60sWindow() throws java.io.IOException {
+        // The constructor's @Value(":0") fallback is DEAD while application.yml supplies the
+        // key, so the operative default is whatever the YAML pins. Operator decision 2026-09-16
+        // (hugmesh-gateway#2, "B: zero window now"): the shipped default is 0 — cache OFF,
+        // every bff_ request round-trips to admin-bff's exchange gate. This test fails if the
+        // YAML default drifts back to 5000 (the previous default: a 5 s suspension-bypass
+        // window), to 60000 (the original full minute), or to ANY positive value, each of
+        // which silently reopens a window. The other cache tests pass cacheTtlMs straight to
+        // the constructor and CANNOT catch this.
         var sources = new org.springframework.boot.env.YamlPropertySourceLoader()
                 .load("application.yml", new org.springframework.core.io.ClassPathResource("application.yml"));
-        String raw = sources.stream()
-                .map(ps -> ps.getProperty("hugmesh.gateway.bff-exchange.cache-ttl-ms"))
-                .filter(java.util.Objects::nonNull).map(String::valueOf)
-                .findFirst().orElse(null);
+        String raw = yamlValue(sources, "hugmesh.gateway.bff-exchange.cache-ttl-ms");
         assertThat(raw)
-                .as("application.yml must default bff-exchange cache-ttl-ms to 5000ms, not the old 60000ms")
-                .isNotNull().contains(":5000}").doesNotContain("60000");
+                .as("application.yml must wire bff-exchange cache-ttl-ms as an env placeholder")
+                .isNotNull()
+                .startsWith("${HUGMESH_GATEWAY_BFF_EXCHANGE_CACHE_TTL_MS:")
+                .endsWith("}");
+        String yamlDefault = yamlFallback(sources, "hugmesh.gateway.bff-exchange.cache-ttl-ms");
+        assertThat(yamlDefault)
+                .as("application.yml must default bff-exchange cache-ttl-ms to 0 (cache OFF) — "
+                        + "5000 reopens a 5 s suspension-bypass window, 60000 a full minute")
+                .isEqualTo("0")
+                .isEqualTo(String.valueOf(BffJwtExchangeWebFilter.DEFAULT_CACHE_TTL_MS));
+        assertThat(Long.parseLong(yamlDefault))
+                .as("any positive YAML default is a reopened suspension-bypass window")
+                .isLessThanOrEqualTo(0L);
     }
 
     // ── (v-d) THE BOUND ITSELF — the clamp, its configurable ceiling, the entry cap ─
@@ -498,10 +509,12 @@ class BffJwtExchangeWebFilterTest {
                 .isEqualTo(yamlFallback(sources, "hugmesh.gateway.bff-exchange.cache-ttl-max-ms"));
 
         assertThat(valueFallback("hugmesh.gateway.bff-exchange.cache-ttl-ms"))
-                .as("the TTL fallback must stay at 5000ms — reverting it to 60000 reopens "
-                        + "the full-minute bypass window with no YAML change to review")
+                .as("the TTL fallback must stay at 0 (cache OFF — operator decision 2026-09-16, "
+                        + "hugmesh-gateway#2): 5000 reopens a 5 s bypass window and 60000 the "
+                        + "full minute, in each case with no YAML change to review")
                 .isNotNull()
-                .isEqualTo("5000")
+                .isEqualTo("0")
+                .isEqualTo(String.valueOf(BffJwtExchangeWebFilter.DEFAULT_CACHE_TTL_MS))
                 .isEqualTo(yamlFallback(sources, "hugmesh.gateway.bff-exchange.cache-ttl-ms"));
 
         assertThat(valueFallback("hugmesh.gateway.bff-exchange.cache-max-size"))
@@ -558,24 +571,81 @@ class BffJwtExchangeWebFilterTest {
     @Test
     void configLessWindow_isTheTtlFallback_andTheCeilingBoundsEveryOverride() {
         // The ceiling fallback is NOT what a config-less deployment gets: the effective
-        // window is min(cache-ttl-ms, cache-ttl-max-ms), i.e. the 5s TTL fallback. Widening
-        // the ceiling alone changes nothing until cache-ttl-ms is separately raised. Stated
-        // here because the review of the guard above described the ceiling as the config-less
-        // window, which overstates it by a factor of twelve — the guard is right, the
-        // narrative was not, and an over-claimed bound is how a real one stops being read.
+        // window is min(cache-ttl-ms, cache-ttl-max-ms), i.e. the TTL fallback — and since
+        // 2026-09-16 that fallback is 0, so a config-less deployment runs with the cache OFF
+        // (zero window), not the 5 s it used to get. Widening the ceiling alone changes
+        // nothing until cache-ttl-ms is separately raised. Stated here because the review of
+        // the guard above once described the ceiling as the config-less window, which
+        // overstated it — the guard is right, the narrative was not, and an over-claimed
+        // bound is how a real one stops being read.
         long ttlFallback = Long.parseLong(valueFallback(BFF_EXCHANGE + "cache-ttl-ms"));
         long ceilingFallback = Long.parseLong(valueFallback(BFF_EXCHANGE + "cache-ttl-max-ms"));
         var stub = new StubExchange(n -> Mono.just(jsonResponse(HttpStatus.OK, "{\"bearer\":\"c\"}")));
 
         assertThat(filter(stub, ttlFallback, ceilingFallback, 10_000).cacheTtlMillis())
-                .as("with NO property source the window is min(%d, %d) = the TTL fallback",
-                        ttlFallback, ceilingFallback)
+                .as("with NO property source the window is min(%d, %d) = the TTL fallback, "
+                        + "which is 0 (cache OFF) since 2026-09-16", ttlFallback, ceilingFallback)
                 .isEqualTo(ttlFallback)
-                .isEqualTo(5_000L);
+                .isZero();
 
         assertThat(filter(stub, Long.MAX_VALUE, ceilingFallback, 10_000).cacheTtlMillis())
                 .as("no cache-ttl-ms override can buy a window wider than the ceiling")
                 .isEqualTo(ceilingFallback);
+    }
+
+    @Test
+    void shippedDefault_cacheOff_everyBffRequestRoundTripsToAdminBff_aDriftBackTo5000GoesRed() {
+        // THE 2026-09-16 DECISION (hugmesh-gateway#2, "B: zero window now"), held
+        // BEHAVIOURALLY rather than as a number: build the filter from the REAL @Value
+        // fallbacks (what Spring injects with no property source at all) and prove that
+        // three requests for the SAME bff_ session are three admin-bff exchange calls — no
+        // cache hit, so a suspension between any two of them is enforced by the next.
+        // WHERE THIS ACTUALLY GOES RED, measured (mutation battery, 2026-09-16) rather than
+        // assumed: a coherent drift of all three statements back to 5000 fails at the FIRST
+        // assertion below ("the shipped cache-ttl-ms default is 0"), so the three-request half
+        // never runs. An earlier wording here said requests 2 and 3 become cache hits
+        // (stub.calls == 1) — that is the mechanism, but it is not the assertion that fires.
+        // The applicationYml_… and constructorValueFallbacks_… guards pin the YAML default and
+        // the named constant to the same 0, so all three statements of the number have to
+        // drift together to stay green, and that drift is red here too.
+        //
+        // The rest of this test exists for the regression class a number-pinning guard CANNOT
+        // see: all three literals still 0, but the CODE reopens a window. Two such mutations
+        // were measured red here, both at "effective window at the shipped defaults" —
+        // reading a non-positive ttl as "use the ceiling" (which hands a config-less
+        // deployment a 60 s window), and a "minimum 1 s cache" floor with cacheEnabled forced
+        // true. The three-requests/three-swaps loop below is the backstop under those: it
+        // stays red for any mutation that reports a zero window and still serves a second
+        // request from the cache.
+        var fallbacks = bffExchangeValueFallbacks();
+        long ttl = Long.parseLong(fallbacks.get(BFF_EXCHANGE + "cache-ttl-ms"));
+        long ceiling = Long.parseLong(fallbacks.get(BFF_EXCHANGE + "cache-ttl-max-ms"));
+        int maxSize = Integer.parseInt(fallbacks.get(BFF_EXCHANGE + "cache-max-size"));
+        assertThat(ttl)
+                .as("the shipped cache-ttl-ms default is 0 — cache OFF")
+                .isZero()
+                .isEqualTo(BffJwtExchangeWebFilter.DEFAULT_CACHE_TTL_MS);
+        assertThat(ceiling)
+                .as("the ceiling still bounds any opt-in positive cache-ttl-ms override")
+                .isEqualTo(BffJwtExchangeWebFilter.DEFAULT_CACHE_TTL_CEILING_MS);
+
+        var stub = new StubExchange(n -> Mono.just(jsonResponse(HttpStatus.OK,
+                "{\"bearer\":\"custody-" + n + "\"}")));
+        var f = filter(stub, ttl, ceiling, maxSize);
+        assertThat(f.cacheTtlMillis()).as("effective window at the shipped defaults").isZero();
+
+        for (int i = 1; i <= 3; i++) {
+            var ex = exchange("bff_shipped-default");
+            var chain = new RecordingChain();
+            StepVerifier.create(f.filter(ex, chain)).verifyComplete();
+            assertThat(chain.forwardedAuth())
+                    .as("request %d forwards the swap minted for IT, never a cached one", i)
+                    .isEqualTo("Bearer custody-" + i);
+        }
+        assertThat(stub.calls)
+                .as("cache OFF by default ⇒ admin-bff's exchange gate is consulted on EVERY "
+                        + "bff_ request (3 requests, 3 swaps); a 5000 default would make this 1")
+                .hasValue(3);
     }
 
     // ── (viii) ORDER — before Spring Security, one slot behind the cookie bridge ──
