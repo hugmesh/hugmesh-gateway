@@ -243,11 +243,17 @@ hugmesh:
       # Positive-swap cache TTL — failed swaps are NEVER cached. THE TTL IS THE
       # SUSPENSION-BYPASS WINDOW: a cache hit skips admin-bff's exchange suspension gate,
       # so a session suspended after its swap was cached keeps authorizing until the entry
-      # expires. Default 5s (matched to revocation refresh-interval-ms above), clamped to
-      # cache-ttl-max-ms below. Set to 0 to DISABLE the cache entirely (every request
-      # re-consults the gate => ZERO bypass window, at one in-cluster swap per request) —
-      # recommended where revocation is not wired (RevocationGatewayFilter inert).
-      cache-ttl-ms: ${HUGMESH_GATEWAY_BFF_EXCHANGE_CACHE_TTL_MS:5000}
+      # expires. DEFAULT 0 = CACHE OFF (operator decision 2026-09-16, hugmesh-gateway#2,
+      # "B: zero window now"): every bff_ request re-consults the gate => ZERO bypass
+      # window, at one in-cluster swap call per bff_-bearing request on the fe-gateway
+      # (native-JWT and anonymous traffic never touches the exchange). The previous
+      # default was 5000 (matched to revocation refresh-interval-ms above), itself down
+      # from 60000; a deployment that accepts a bounded window opts in with a positive
+      # value, clamped to cache-ttl-max-ms below. The proactive admin-bff -> gateway
+      # eviction push (option A on #2) is a post-launch build. This default is pinned by
+      # BffJwtExchangeWebFilterTest (constant, @Value fallback and this line must agree
+      # at 0) — a drift back to 5000 here goes red.
+      cache-ttl-ms: ${HUGMESH_GATEWAY_BFF_EXCHANGE_CACHE_TTL_MS:0}
       # CEILING on the above — the widest suspension-staleness window this deployment
       # tolerates. Effective TTL = min(cache-ttl-ms, cache-ttl-max-ms). Was an
       # unconfigurable 60_000 literal in the clamp expression; a deployment that wants a

@@ -253,6 +253,9 @@ exchange OFF (see each bullet below for its flag's default):
   **PR #68** bounds the positive swap cache (default TTL 60s → 5s; `cache-ttl-ms ≤ 0`
   disables the cache entirely for a zero-staleness window). admin-bff **#167**
   additionally revokes the `subject:<custody-sub>` key on role-revoke + suspension.
+  **2026-09-16 (#2, operator decision "B: zero window now"):** the shipped default is
+  now `cache-ttl-ms=0` — cache OFF, every `bff_` request round-trips to admin-bff; the
+  admin-bff → gateway eviction push (option A) is a post-launch build.
 
 **Still owed (cross-repo, to flip these on live):** the SSO ensemble pieces are
 now merged in their repos (see the table below — the admin-bff
