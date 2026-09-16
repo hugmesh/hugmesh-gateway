@@ -448,8 +448,12 @@ forward-looking, not-yet-started work in *Roadmap* below):
   ("B: zero window now"): the shipped `cache-ttl-ms` default is **0**, so every `bff_`
   request round-trips to admin-bff and a suspension is enforced on the very next
   request. The cost is one in-cluster swap call per `bff_`-bearing request on the
-  fe-gateway (the only tier with the exchange on; native-JWT and anonymous traffic is
-  untouched). The proactive admin-bff → gateway eviction push (option A on #2) is a
+  fe-gateway — as of 2026-09-16 the only tier the mesh generator turns the exchange on
+  for (`hugmesh-generator` `specs/cluster/apps/20-gateway-fe.yaml`,
+  `HUGMESH_GATEWAY_BFF_EXCHANGE_ENABLED: "true"`; the be-gateway app declares no
+  bff-exchange block), which is a deployment fact owned by *that* repo and can change
+  there without this README knowing. Native-JWT and anonymous traffic is untouched on
+  every tier. The proactive admin-bff → gateway eviction push (option A on #2) is a
   post-launch build. For a deployment that opts into a positive TTL, the window is
   bounded on three axes, all configurable and all held in place by tests:
   `cache-ttl-ms` (was 5s by default until 2026-09-16, now 0) is clamped to `cache-ttl-max-ms`

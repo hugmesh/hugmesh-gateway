@@ -600,10 +600,23 @@ class BffJwtExchangeWebFilterTest {
         // fallbacks (what Spring injects with no property source at all) and prove that
         // three requests for the SAME bff_ session are three admin-bff exchange calls — no
         // cache hit, so a suspension between any two of them is enforced by the next.
-        // Under the previous 5000 fallback the 2nd and 3rd requests were cache hits
-        // (stub.calls == 1) and the last assertion below is red; the applicationYml_… and
-        // constructorValueFallbacks_… guards pin the YAML default and the named constant to
-        // the same 0, so all three statements of the number must drift together to stay green.
+        // WHERE THIS ACTUALLY GOES RED, measured (mutation battery, 2026-09-16) rather than
+        // assumed: a coherent drift of all three statements back to 5000 fails at the FIRST
+        // assertion below ("the shipped cache-ttl-ms default is 0"), so the three-request half
+        // never runs. An earlier wording here said requests 2 and 3 become cache hits
+        // (stub.calls == 1) — that is the mechanism, but it is not the assertion that fires.
+        // The applicationYml_… and constructorValueFallbacks_… guards pin the YAML default and
+        // the named constant to the same 0, so all three statements of the number have to
+        // drift together to stay green, and that drift is red here too.
+        //
+        // The rest of this test exists for the regression class a number-pinning guard CANNOT
+        // see: all three literals still 0, but the CODE reopens a window. Two such mutations
+        // were measured red here, both at "effective window at the shipped defaults" —
+        // reading a non-positive ttl as "use the ceiling" (which hands a config-less
+        // deployment a 60 s window), and a "minimum 1 s cache" floor with cacheEnabled forced
+        // true. The three-requests/three-swaps loop below is the backstop under those: it
+        // stays red for any mutation that reports a zero window and still serves a second
+        // request from the cache.
         var fallbacks = bffExchangeValueFallbacks();
         long ttl = Long.parseLong(fallbacks.get(BFF_EXCHANGE + "cache-ttl-ms"));
         long ceiling = Long.parseLong(fallbacks.get(BFF_EXCHANGE + "cache-ttl-max-ms"));

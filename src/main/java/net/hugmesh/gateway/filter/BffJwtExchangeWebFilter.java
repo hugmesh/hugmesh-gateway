@@ -126,11 +126,14 @@ public class BffJwtExchangeWebFilter implements WebFilter, Ordered {
      * i.e. the positive-swap cache is OFF and every {@code bff_} request re-consults
      * admin-bff's exchange gate (zero suspension-bypass window). Set on 2026-09-16 by
      * operator decision on hugmesh-gateway#2 ("B: zero window now"); the proactive
-     * admin-bff → gateway eviction push (option A) is a post-launch build. The three
-     * statements of this number — this constant, the {@code @Value} fallback on the
-     * constructor, and the wired {@code application.yml} default — are held equal by
-     * {@code BffJwtExchangeWebFilterTest}, which goes red if any of them drifts back to
-     * {@code 5000} (or to any positive value).
+     * admin-bff → gateway eviction push (option A) is a post-launch build.
+     *
+     * <p>This constant is a PIN, not an operative default: no production code reads it
+     * (javadoc and tests only — same pattern as {@link #DEFAULT_CACHE_TTL_CEILING_MS}).
+     * The two places the number actually takes effect are the {@code @Value} fallback on
+     * the constructor and the wired {@code application.yml} default; all three are held
+     * equal by {@code BffJwtExchangeWebFilterTest}, which goes red if ANY of them drifts
+     * back to {@code 5000} (or to any positive value) on its own.
      */
     static final long DEFAULT_CACHE_TTL_MS = 0L;
 
