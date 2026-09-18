@@ -515,18 +515,22 @@ final class CanonicalSeed {
                 // narrated: see canonicalSeed_feGateway_superadminRow_* and
                 // hugmesh-generator's fallback-floor-parity.feature.
                 //
-                // mfaRequired STAYS false here, like every other baked row (D8).
-                // The cluster seed's flip UPDATE (`SET mfa_required = true WHERE
+                // UPDATE 2026-09-18 (decision 56, hugmesh-generator#347): this
+                // row's id IS a member of MFA_REQUIRED_FALLBACK_ROWS above, so
+                // r() now computes mfaRequired=true for it — the paragraph
+                // that used to be here ("mfaRequired STAYS false ... the baked
+                // floor deliberately does NOT carry mfa_required=true") is no
+                // longer accurate FOR THIS ROW and has been corrected. The
+                // cluster seed's flip UPDATE (`SET mfa_required = true WHERE
                 // allow AND url_pattern LIKE '/bff/superadmin/%'`) reaches the
-                // POSTGRES copy of this row, and reaching it is the gain #244 was
-                // decided for — isMfaRequiredSurface() returns false for an
-                // UNGOVERNED path (GatewayRouteAccessService "if (bestLen < 0)
-                // return false"), so before the Postgres row the privileged step-up
-                // floor had nothing at the public door to hang on. The baked floor
-                // deliberately does NOT carry mfa_required=true (the schema file
-                // says so out loud), so a dual-DB outage drops MFA enforcement on
-                // these prefixes while role gating still applies. That is the
-                // documented, accepted residual — not an oversight of this row.
+                // POSTGRES copy of this row; decision 56 closes the residual
+                // that used to leave the BAKED floor without the same step-up
+                // requirement, so a dual-DB outage no longer drops MFA
+                // enforcement on this exact prefix — see
+                // canonicalSeed_declaredMfaRows_isMfaRequiredSurfaceIsTrueOnTheFallback
+                // in GatewayRouteAccessServiceTest. Every OTHER baked row not
+                // named in MFA_REQUIRED_FALLBACK_ROWS still keeps D8's
+                // mfaRequired=false default unchanged.
                 r(FE, "/bff/superadmin/**", "ROLE_SUPERADMIN"),
                 // Character Forge (OPTIONAL slug `character-forge`): the 3D
                 // character-maker remote (/character-forge/** UI shell,

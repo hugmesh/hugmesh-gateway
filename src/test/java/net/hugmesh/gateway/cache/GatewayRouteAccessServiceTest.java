@@ -1069,6 +1069,74 @@ class GatewayRouteAccessServiceTest {
         }
     }
 
+    // ── DECISION 61 — the platform must not ship a '/**' row its own admin API
+    // refuses (hugmesh-admin-bff-api#57, hugmesh-generator#347, 2026-09-18) ──────
+
+    @Test
+    void noSeed_shipsABareDoubleStarRow_beyondTheOneDocumentedPkiHeadscaleException() {
+        // hugmesh-admin-bff-api's AdminController.addRouteRule refuses a
+        // url_pattern whose first path segment is a bare wildcard ('/**' has
+        // none) — an operator who deletes such a row can never recreate it
+        // through the admin API. Decision 61 = refuse: the API keeps refusing
+        // it, so seeds must stop SHIPPING one.
+        //
+        // This guard is bounded to the ONE row that could NOT be closed:
+        // pki-gateway's headscale catch-all (r(PKI, "/**", "ROLE_SUPERADMIN"),
+        // bug #15). It is genuinely open-ended — the `headscale` route in
+        // application-pki.yml matches Host=scale.hugmesh.net with NO Path
+        // predicate, so ANY path on that Host must floor to SUPERADMIN or the
+        // pre-bug-#15 hole reopens (an authenticated ROLE_USER reaching the
+        // headscale control plane). Replacing it with a finite explicit-prefix
+        // set would mean fabricating an enumeration of headscale's own HTTP
+        // surface — an external, evolving API this repo does not vendor or
+        // control, so a missed endpoint silently REOPENS #15 the next time
+        // headscale gains one — or moving the row's enforcement out of
+        // gateway_route_access into SecurityConfig, which is a materially
+        // bigger, unauthorised change (SecurityConfig.java is outside this
+        // lane's file set). Neither is done. Filed on hugmesh-admin-bff-api#57
+        // as the residual decision 61 could not settle.
+        //
+        // What this guard DOES buy: the set of bare-/** rows can never grow
+        // past this one without a test change forcing the addition to be
+        // argued, in EITHER seed this repo owns.
+        String pkiHeadscaleException = "seed:" + CanonicalSeed.PKI + ":/**:ROLE_SUPERADMIN";
+
+        for (String gateway : List.of(CanonicalSeed.PKI, CanonicalSeed.BE, CanonicalSeed.FE)) {
+            List<String> bareDoubleStarIds = CanonicalSeed.forGateway(gateway).stream()
+                    .filter(r -> "/**".equals(r.urlPattern()))
+                    .map(Rule::id)
+                    .toList();
+            assertThat(bareDoubleStarIds)
+                .as("CanonicalSeed.%s() must ship no bare /** row beyond the documented exception", gateway)
+                .allMatch(pkiHeadscaleException::equals);
+        }
+        assertThat(CanonicalSeed.forGateway(CanonicalSeed.PKI))
+            .as("the one documented exception must still be exactly there (not silently dropped)")
+            .anyMatch(r -> pkiHeadscaleException.equals(r.id()));
+
+        Path seedSql = Path.of("compose", "route-access-seed.sql");
+        assertThat(seedSql)
+            .as("the compose Postgres seed must exist (test runs from the module basedir)")
+            .exists();
+        String sql;
+        try {
+            sql = Files.readString(seedSql, StandardCharsets.UTF_8);
+        } catch (IOException e) {
+            throw new UncheckedIOException("could not read " + seedSql, e);
+        }
+        String rows = sql.replaceAll("(?m)--[^\n]*", "");
+        var m = Pattern.compile("\\('([^']+)',\\s*'([^']*)',\\s*'([^']+)',\\s*(true|false)\\)").matcher(rows);
+        var bareDoubleStarInCompose = new ArrayList<String>();
+        while (m.find()) {
+            if ("/**".equals(m.group(2))) {
+                bareDoubleStarInCompose.add(m.group(1) + ":" + m.group(2) + ":" + m.group(3));
+            }
+        }
+        assertThat(bareDoubleStarInCompose)
+            .as("compose/route-access-seed.sql must ship EXACTLY the one documented bare-/** exception")
+            .containsExactly(CanonicalSeed.PKI + ":/**:ROLE_SUPERADMIN");
+    }
+
     // ── The edge-AI /v1 space in the LOCAL-DEV Postgres seed (issue #4, TODO 1) ──
 
     /** Every {@code ('gw', 'pattern', 'ROLE_x', true|false)} tuple in the
