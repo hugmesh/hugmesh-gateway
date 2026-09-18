@@ -727,26 +727,30 @@ class GatewayRouteAccessServiceTest {
             .as("no /bff/superadmin/games-services/** refinement row (it would strip the MFA floor)")
             .noneMatch(r -> r.urlPattern().startsWith("/bff/superadmin/games-services"));
 
-        // D8: the BAKED floor never demands a second factor. mfa_required=true is
-        // written ONLY by the cluster seed's flip UPDATE
+        // D8, NARROWED BY DECISION 56 (hugmesh-generator#347, operator answer
+        // 2026-09-18: "a declared set of privileged rows"). This row is IN the
+        // declared set (CanonicalSeed.MFA_REQUIRED_FALLBACK_ROWS) because its
+        // cluster Postgres counterpart is mfa_required=true via the blanket flip
         //   SET mfa_required = true WHERE allow AND url_pattern LIKE '/bff/superadmin/%'
-        // onto the POSTGRES copy. Reaching that row is the gain #244 was decided
-        // for — isMfaRequiredSurface() returns false for an UNGOVERNED path, so
-        // before the Postgres row the privileged step-up floor had nothing at the
-        // public browser door to attach to.
+        // — reaching that row was decision 41's third, previously-undelivered gain
+        // (#244 / hugmesh-gateway#35): isMfaRequiredSurface() returns false for an
+        // UNGOVERNED path, so before this flip the privileged step-up floor had
+        // nothing at the public browser door to attach to even after #33 landed.
+        // Every OTHER baked row still carries mfa_required=false (D8's default,
+        // unchanged for anything not in the declared set).
         assertThat(row.mfaRequired())
-            .as("the baked floor carries mfa_required=false (D8) — the flip lives in Postgres")
-            .isFalse();
-        // ...and the ACCEPTED RESIDUAL, pinned rather than narrated: on the
-        // datastore-unreachable fallback the MFA floor DROPS on this prefix while
-        // role gating still applies. The schema file states this out loud; if the
-        // baked floor is ever given mfa_required=true this assertion goes red and
-        // the change has to be argued, not slipped in.
+            .as("decision 56: this row is in the declared MFA-required set")
+            .isTrue();
+        // ...and the RESIDUAL THAT CLOSES: on the datastore-unreachable fallback
+        // the superadmin platform console is now BOTH role-gated AND MFA-gated,
+        // matching the cluster seed. If this row is ever removed from the declared
+        // set this assertion goes red and the change has to be argued, not slipped
+        // in.
         var s = new GatewayRouteAccessService(null, null, "hugmesh-fe-gateway", true, false, null);
         s.primeForTest(fe);
         assertThat(s.isMfaRequiredSurface("/bff/superadmin/service-store/catalog", "default"))
-            .as("fallback floor: the superadmin door is role-gated but NOT MFA-gated")
-            .isFalse();
+            .as("decision 56: the superadmin door is role-gated AND MFA-gated on the fallback")
+            .isTrue();
     }
 
     @Test
@@ -1773,10 +1777,88 @@ class GatewayRouteAccessServiceTest {
         assertThat(s.isMfaRequiredSurface("/nope/here", "default")).isFalse();
     }
 
+    // ── DECISION 56 — the declared MFA-required set on the baked floor ──────────
+    // hugmesh-generator#347, operator answer 2026-09-18: "a declared set of
+    // privileged rows". See CanonicalSeed.MFA_REQUIRED_FALLBACK_ROWS for the full
+    // derivation from the cluster Postgres seed's blanket flip UPDATE.
+
+    @Test
+    void canonicalSeed_mfaRequiredFallbackRows_everyEntryMatchesARealBakedRow() {
+        // TYPO SAFETY. CanonicalSeed.r() looks entries up by Rule.id(); an id that
+        // does not match any row CanonicalSeed actually emits would simply never be
+        // found, silently declaring NOTHING rather than failing loud. This proves
+        // the declared set is a SUBSET of the ids the three real tiers emit (plus
+        // the generic per-brand/unknown floor, which cannot carry a declared row by
+        // construction — it is always exactly one r(gateway, "/**", "ROLE_ADMIN")).
+        var allIds = java.util.stream.Stream.of(
+                        CanonicalSeed.forGateway(CanonicalSeed.PKI),
+                        CanonicalSeed.forGateway(CanonicalSeed.BE),
+                        CanonicalSeed.forGateway(CanonicalSeed.FE))
+                .flatMap(List::stream)
+                .map(Rule::id)
+                .collect(java.util.stream.Collectors.toSet());
+        assertThat(allIds)
+            .as("every MFA_REQUIRED_FALLBACK_ROWS entry must be a real baked row id")
+            .containsAll(CanonicalSeed.MFA_REQUIRED_FALLBACK_ROWS);
+    }
+
+    @Test
+    void canonicalSeed_declaredMfaRows_isMfaRequiredSurfaceIsTrueOnTheFallback() {
+        // Every row named in the declared set: isMfaRequiredSurface() must be TRUE
+        // on the SEED-ONLY fallback (no datastore, no Postgres flip needed) for a
+        // representative path under it.
+        var be = new GatewayRouteAccessService(null, null, CanonicalSeed.BE, true, false, null);
+        be.primeForTest(CanonicalSeed.forGateway(CanonicalSeed.BE));
+        assertThat(be.isMfaRequiredSurface("/bff/superadmin/workloads", "default"))
+            .as("be /bff/superadmin/** is in the declared set")
+            .isTrue();
+        // The be row also governs the games-services subtree (no more specific be
+        // row exists), so the declared floor's MFA gain reaches it too.
+        assertThat(be.isMfaRequiredSurface("/bff/superadmin/games-services/catalog", "default"))
+            .as("be /bff/superadmin/** covers its own games-services subtree")
+            .isTrue();
+
+        var fe = new GatewayRouteAccessService(null, null, CanonicalSeed.FE, true, false, null);
+        fe.primeForTest(CanonicalSeed.forGateway(CanonicalSeed.FE));
+        assertThat(fe.isMfaRequiredSurface("/bff/superadmin/service-store/catalog", "default"))
+            .as("fe /bff/superadmin/** is in the declared set (decision 41's row)")
+            .isTrue();
+        assertThat(fe.isMfaRequiredSurface("/bff/admin/phone-fleet/devices", "default"))
+            .as("fe /bff/admin/phone-fleet/** is in the declared set (all three paired roles)")
+            .isTrue();
+        assertThat(fe.isMfaRequiredSurface("/bff/admin/announcements", "default"))
+            .as("fe /bff/admin/** is in the declared set")
+            .isTrue();
+    }
+
+    @Test
+    void canonicalSeed_undeclaredPrivilegedRows_isMfaRequiredSurfaceStaysFalse() {
+        // D8's default is UNCHANGED for every baked row NOT in the declared set,
+        // even other SUPERADMIN-only surfaces — narrowing is deliberate, not a
+        // side effect of "every privileged row gained it".
+        var pki = new GatewayRouteAccessService(null, null, CanonicalSeed.PKI, true, false, null);
+        pki.primeForTest(CanonicalSeed.forGateway(CanonicalSeed.PKI));
+        assertThat(pki.isMfaRequiredSurface("/key", "default"))
+            .as("pki's /** headscale catch-all is NOT in the declared set (its cluster "
+              + "seed counterpart is mfa_required=false too — the pattern is not under "
+              + "/bff/admin or /bff/superadmin)")
+            .isFalse();
+
+        var be = new GatewayRouteAccessService(null, null, CanonicalSeed.BE, true, false, null);
+        be.primeForTest(CanonicalSeed.forGateway(CanonicalSeed.BE));
+        assertThat(be.isMfaRequiredSurface("/bff/image-builds/arch/x86", "default"))
+            .as("be's /bff/image-builds/arch/** is SUPERADMIN-only but NOT in the "
+              + "declared set (not under /bff/admin or /bff/superadmin)")
+            .isFalse();
+    }
+
     @Test
     void isPrimed_seedOnly_isTrue_noDatastore() {
-        // No Postgres + no Cassandra wired: the seed IS authoritative (it carries no
-        // mfa_required rows), so isPrimed() is TRUE and the floor is never a 503.
+        // No Postgres + no Cassandra wired: the seed IS authoritative — since
+        // decision 56 it DOES carry some mfa_required=true rows (be()'s
+        // /bff/superadmin/** among them), but nothing ever supersedes the seed in
+        // this mode, so there is no discovery lag for isPrimed() to guard against.
+        // isPrimed() is TRUE and the floor is never a 503.
         var s = new GatewayRouteAccessService(null, null, "hugmesh-be-gateway", true, true, null);
         s.init();
         assertThat(s.isPrimed()).isTrue();

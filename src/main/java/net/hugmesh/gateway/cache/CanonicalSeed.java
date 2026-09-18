@@ -3,6 +3,7 @@ package net.hugmesh.gateway.cache;
 import net.hugmesh.gateway.cache.GatewayRouteAccessService.Rule;
 
 import java.util.List;
+import java.util.Set;
 
 /**
  * The canonical {@code gateway_route_access} seed from the route-access
@@ -65,21 +66,94 @@ final class CanonicalSeed {
         return List.of(r(gateway, "/**", "ROLE_ADMIN"));
     }
 
+    /**
+     * DECISION 56 = "a declared set of privileged rows" (hugmesh-generator#347,
+     * operator answer 2026-09-18; option 2 of the three named on
+     * hugmesh-gateway#35, which hugmesh-generator#244 comment 2026-09-18T03:52Z
+     * left open as decision 41's residual). D8's default — the baked floor NEVER
+     * demands a second factor — stays the default for every row {@link #r} builds
+     * EXCEPT the ones named here. Bounding it to a small, explicit set (rather
+     * than "every row that carries it in Postgres", option 3) keeps the lock-out
+     * risk D8 exists to avoid bounded to surfaces an operator can name and review.
+     *
+     * <p><b>DERIVED, not invented</b> — the intersection of two things measured
+     * against generator {@code origin/main} @ {@code fefd5084} and this repo's
+     * merged tree (hugmesh-gateway#33, decision 41, folded in alongside this
+     * change) on 2026-09-18:
+     * <ol>
+     *   <li>every {@code ALLOW} row the cluster Postgres seed's blanket flip UPDATE
+     *       (generator {@code specs/cluster/manifests/route-access/initdb/
+     *       20-schema.sql}, the statement right after the decision-28 row-scoped
+     *       one) sets {@code mfa_required = true} on — its predicate is
+     *       {@code allow = true AND (url_pattern = '/bff/admin' OR url_pattern LIKE
+     *       '/bff/admin/%' OR url_pattern = '/bff/superadmin' OR url_pattern LIKE
+     *       '/bff/superadmin/%')}; AND
+     *   <li>the rows {@link #be()} / {@link #fe()} actually bake, i.e. this set
+     *       names no row {@link #r} is never called with.
+     * </ol>
+     *
+     * <pre>
+     *   be():  /bff/superadmin/**                ROLE_SUPERADMIN
+     *   fe():  /bff/admin/phone-fleet/**         ROLE_FLEET_ADMIN
+     *   fe():  /bff/admin/phone-fleet/**         ROLE_ADMIN
+     *   fe():  /bff/admin/phone-fleet/**         ROLE_SUPERADMIN
+     *   fe():  /bff/admin/**                     ROLE_ADMIN
+     *   fe():  /bff/superadmin/**                ROLE_SUPERADMIN   (decision 41)
+     * </pre>
+     *
+     * <p><b>Deliberately NOT in the set</b> (so a future "obviously belongs"
+     * addition has to argue past this, not slip in):
+     * <ul>
+     *   <li>{@code pki()}'s {@code /** -> ROLE_SUPERADMIN} headscale catch-all and
+     *       {@code be()}'s {@code /bff/image-builds/arch/** -> ROLE_SUPERADMIN} —
+     *       neither pattern is under the two prefixes the blanket flip touches, so
+     *       their Postgres counterparts are {@code mfa_required=false} too;
+     *   <li>the {@code fe} {@code /bff/superadmin/games-services/**} DENY row
+     *       (decision 28 = D) — it is {@code mfa_required=true} in the CLUSTER
+     *       seed, but {@link #decide} raises {@code mfaRequiredOnGrant} only from
+     *       rows that GRANT (deny rows can never raise it), decision 41 forbids
+     *       baking it into the floor at all (D8 would carry the wall without the
+     *       floor — see the {@link #fe()} row comment), and this decision does not
+     *       authorise mirroring it either — asked and answered NO on
+     *       hugmesh-generator#347: this mechanism WOULD let a future edit declare
+     *       it (it is an {@code ALLOW}-row-only gate, not a deny-row gate, so
+     *       declaring a deny row here would be inert by construction, not merely
+     *       unauthorised), and it is not done.
+     * </ul>
+     *
+     * <p>Entries are {@link Rule#id()} strings — the exact {@code "seed:" +
+     * gateway + ":" + pattern + ":" + role} {@link #r} below computes — so a typo
+     * here is simply never matched rather than silently mis-targeting a different
+     * row; {@code canonicalSeed_mfaRequiredFallbackRows_everyEntryMatchesARealBakedRow}
+     * pins that every entry actually is a row {@link #forGateway} emits somewhere.
+     */
+    static final Set<String> MFA_REQUIRED_FALLBACK_ROWS = Set.of(
+            "seed:" + BE + ":/bff/superadmin/**:ROLE_SUPERADMIN",
+            "seed:" + FE + ":/bff/admin/phone-fleet/**:ROLE_FLEET_ADMIN",
+            "seed:" + FE + ":/bff/admin/phone-fleet/**:ROLE_ADMIN",
+            "seed:" + FE + ":/bff/admin/phone-fleet/**:ROLE_SUPERADMIN",
+            "seed:" + FE + ":/bff/admin/**:ROLE_ADMIN",
+            "seed:" + FE + ":/bff/superadmin/**:ROLE_SUPERADMIN");
+
     private static Rule r(String gateway, String pattern, String role) {
         // domain=null => UNSCOPED (applies to any target brand). The baked-in seed
         // is the per-tier floor; per-brand domain scoping is carried only by the
         // admin-managed Postgres rows.
         //
-        // mfaRequired=false (D8): the baked-in floor NEVER demands a second factor —
-        // this is the gateway HALF of the dual-write trio (it MUST match the
-        // generator Postgres seed `mfa_required false` in
-        // specs/cluster/manifests/route-access/initdb/20-schema.sql AND the
-        // admin-bff 001-gateway-route-access.xml copy, both landing in lockstep).
-        // Keeping the seed false means a datastore-unreachable fallback can never
-        // accidentally lock out a privileged surface on the bare floor; mfa_required
-        // is enabled per-row only by an admin-managed Postgres row.
-        return new Rule("seed:" + gateway + ":" + pattern + ":" + role,
-                gateway, pattern, role, null, true, null, false);
+        // mfaRequired (D8, narrowed by decision 56): false for every row EXCEPT
+        // the ones named in MFA_REQUIRED_FALLBACK_ROWS above, which carry true.
+        // This is the gateway HALF of the dual-write trio — it MUST match the
+        // generator Postgres seed's blanket-flip predicate in
+        // specs/cluster/manifests/route-access/initdb/20-schema.sql (restricted to
+        // rows CanonicalSeed actually bakes) AND the admin-bff
+        // 001-gateway-route-access.xml copy (DDL only — no seed rows to match).
+        // Keeping every OTHER row false means a datastore-unreachable fallback can
+        // never accidentally lock out a surface nobody declared; mfa_required is
+        // enabled per-row beyond this declared set only by an admin-managed
+        // Postgres row.
+        String id = "seed:" + gateway + ":" + pattern + ":" + role;
+        boolean mfaRequired = MFA_REQUIRED_FALLBACK_ROWS.contains(id);
+        return new Rule(id, gateway, pattern, role, null, true, null, mfaRequired);
     }
 
     /**

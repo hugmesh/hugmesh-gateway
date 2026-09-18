@@ -333,15 +333,23 @@ public class GatewayRouteAccessService {
      * the baked-in {@link CanonicalSeed} floor IS the authority. Mirrors
      * {@link RevocationListService#isPrimed}.
      *
-     * <p>The seed floor NEVER carries {@code mfa_required=true} (those rows live
-     * ONLY in the admin-managed Postgres source of truth), so before the first
-     * successful datastore load the gateway CANNOT yet know whether a path is an
-     * mfa_required surface. When a datastore is wired but has not yet loaded, the
-     * MFA privileged floor cannot make a safe call and the
-     * {@code GatewayRouteAccessFilter} holds the request fail-CLOSED (503). When NO
-     * datastore is wired (route-access disabled, or pure seed/dev), there are no
-     * mfa_required rows to discover, so this returns {@code true} and the floor is
-     * inert — never a 503 on single-tenant/dev.
+     * <p>Before decision 56 (hugmesh-generator#347, 2026-09-18) the seed floor
+     * NEVER carried {@code mfa_required=true} at all, so "no datastore wired"
+     * trivially meant "no mfa_required rows to discover". Decision 56 gives
+     * {@link CanonicalSeed#MFA_REQUIRED_FALLBACK_ROWS} true on the SEED itself —
+     * this method's safety property still holds, for a different reason: when NO
+     * datastore is wired the seed is never superseded by anything, so it is
+     * authoritative from the first request with no discovery lag, and its declared
+     * rows already answer {@link #isMfaRequiredSurface} correctly. The case this
+     * method still guards is a datastore that IS wired but has not yet loaded —
+     * THERE the seed's mfa_required=false default (every row outside the declared
+     * set, and every row before decision 56) could understate a Postgres row's
+     * true mfa_required=true, so the {@code GatewayRouteAccessFilter} holds the
+     * request fail-CLOSED (503) until {@code lastRefreshAt} moves. When NO
+     * datastore is wired (route-access disabled, or pure seed/dev) this returns
+     * {@code true} and the floor is never a 503 on single-tenant/dev — the seed's
+     * own mfa_required rows (declared-set ones included) are enforced immediately,
+     * not skipped.
      */
     public boolean isPrimed() {
         if (!enabled) return true;                 // gate never enforced -> nothing to prime
