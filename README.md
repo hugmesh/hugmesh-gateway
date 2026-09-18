@@ -363,7 +363,14 @@ unscoped/`default`-owned key remains writable single-tenant (back-compat).
 - **Image-builder / superadmin console** — `/bff/image-builds/**` is gated on the
   granted `ROLE_IMAGE_BUILDER` capability (not an admin default), with
   `/bff/image-builds/arch/**` and `/bff/superadmin/**` reserved for `ROLE_SUPERADMIN`
-  (longest-pattern-match makes the arch surface superadmin-only).
+  (longest-pattern-match makes the arch surface superadmin-only). Those are `be`
+  (tailnet) rows; since hugmesh-generator#244 = ACCEPT (decision 41)
+  `CanonicalSeed.fe()` **also** carries `/bff/superadmin/** -> ROLE_SUPERADMIN`, so
+  the superadmin platform console is governed at the **public browser door** too —
+  on the datastore-unreachable fallback it is a 403 with `X-Route-Denied` instead
+  of a `NO_RULE` forward into admin-bff. The cluster Postgres seed additionally
+  carries an fe `/bff/superadmin/games-services/**` **deny** row (decision 28 = D)
+  that the baked floor deliberately does not mirror.
 - **Fleet-owner phone/MDM console gate** — `/bff/admin/phone-fleet/**` is gated on
   the granted `ROLE_FLEET_ADMIN` capability (also reachable by `ROLE_ADMIN` /
   `ROLE_SUPERADMIN`), the one `/bff/admin/**` subpath a non-superadmin fleet-owner

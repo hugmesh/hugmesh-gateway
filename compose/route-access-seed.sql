@@ -195,6 +195,14 @@ INSERT INTO gateway_route_access (gateway, url_pattern, role, allow) VALUES
   ('hugmesh-fe-gateway',   '/bff/admin/phone-fleet/**', 'ROLE_ADMIN',       true),
   ('hugmesh-fe-gateway',   '/bff/admin/phone-fleet/**', 'ROLE_SUPERADMIN',  true),
   ('hugmesh-fe-gateway',   '/bff/admin/**',         'ROLE_ADMIN', true),
+  -- Superadmin platform console at the PUBLIC browser door (hugmesh-generator#244
+  -- = ACCEPT, decision 41, 2026-09-17). Dual-write partner of the baked
+  -- CanonicalSeed.fe() row added in hugmesh-gateway#33: without this row here the
+  -- local-dev compose stack still shows the pre-#244 posture (NO_RULE -> forward)
+  -- even after #33 merges, because this file REPLACES the baked floor wholesale
+  -- when Postgres loads. No games-services DENY refinement here, same as the
+  -- baked copy (decision 41 authorises exactly this one row).
+  ('hugmesh-fe-gateway',   '/bff/superadmin/**',    'ROLE_SUPERADMIN', true),
   -- Character Forge (OPTIONAL slug `character-forge`): the 3D character-maker
   -- remote UI shell + its BFF. Plain ROLE_USER capability floor
   -- (character-studio precedent); do NOT pair ROLE_ADMIN on a capability floor
