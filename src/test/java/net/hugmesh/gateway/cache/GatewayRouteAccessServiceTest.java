@@ -1118,6 +1118,95 @@ class GatewayRouteAccessServiceTest {
             .isEqualTo(Decision.ALLOW);
     }
 
+    // ── The fe-gateway block in the LOCAL-DEV Postgres seed (issue #34) ─────────
+
+    @Test
+    void composeSeed_feGateway_wholeBlockMatchesTheBakedCanonicalSeedExactly() {
+        // ENUMERATIVE PARITY (issue #34), the fe-gateway sibling of
+        // composeSeed_beGateway_wholeBlockMatchesTheBakedCanonicalSeedExactly above,
+        // for the same reason F2 motivated that one: the hand-listed
+        // canonicalSeed_feGateway_internalDenyRows_areMirroredInTheComposePostgresSeed
+        // test only pins THREE rows by name, and the fe block had drifted on the
+        // OTHER 16 without any test going red — measured on main @ 13f1651d:
+        // baked fe() carried 33 rows, the compose seed carried 17, and the missing
+        // 16 included the whole anonymous SPA shell (/index.html, /*.js, /*.css,
+        // /assets/**, the federation-read PUBLIC rows), the public login-page
+        // announcements/appeal-contact reads, the /bff/admin/phone-fleet/** trio
+        // and /games/admin/**. Since compose/route-access-seed.sql REPLACES the
+        // baked seed wholesale once Postgres loads, the missing PUBLIC rows left
+        // the dev stack's anonymous shell 401-walled where the baked floor opens
+        // it, and (in the opposite direction of harm) a developer running the
+        // compose stack never saw the phone-fleet / games-admin gates enforced at
+        // all — both silent, because nothing enumerated the full set.
+        //
+        // Deliberately UNFILTERED, both directions, on (pattern, role, allow): any
+        // future row added to CanonicalSeed.fe() and not mirrored here — or vice
+        // versa — fails this test instead of waiting for another skeptic to grep
+        // both files by hand. There is currently nothing deliberately dev-only in
+        // the fe block; if one is ever needed, name it in an explicit exception set
+        // HERE, with the reason, rather than re-narrowing this assertion.
+        var compose = composeSeedRulesFor("hugmesh-fe-gateway").stream()
+                .map(r -> r.urlPattern() + "|" + r.role() + "|" + r.allow())
+                .distinct().sorted().toList();
+        var baked = CanonicalSeed.forGateway("hugmesh-fe-gateway").stream()
+                .map(r -> r.urlPattern() + "|" + r.role() + "|" + r.allow())
+                .distinct().sorted().toList();
+        assertThat(baked)
+            .as("guard sanity: a broken CanonicalSeed lookup would make this vacuous")
+            .hasSizeGreaterThan(20);
+        assertThat(compose)
+            .as("compose/route-access-seed.sql and CanonicalSeed.fe() are a DUAL WRITE: "
+                    + "the whole fe-gateway block must agree on pattern, role and allow")
+            .isEqualTo(baked);
+    }
+
+    @Test
+    void composeSeed_feGateway_spaShellAndPublicReads_resolveAnonymously() {
+        // Behavioural half, phrased like composeSeed_beGateway_gamesSurface above:
+        // presence in the file is not enough on its own, the dev seed must actually
+        // decide these paths PUBLIC. Before the rows landed every assertion below
+        // answered NO_RULE (which the coarse authenticated() floor then 401s) —
+        // i.e. the anonymous SPA shell was UNGOVERNED-and-401ing on this dev seed
+        // even though the baked floor opens it.
+        var rules = composeSeedRulesFor("hugmesh-fe-gateway");
+        assertThat(rules)
+            .as("parse sanity: the fe-gateway block must yield a plausible row count "
+                    + "(a broken regex would make every assertion below vacuous)")
+            .hasSizeGreaterThan(20);
+        var s = new GatewayRouteAccessService(null, null, "hugmesh-fe-gateway", true, false, null);
+        s.primeForTest(rules);
+
+        for (String path : List.of("/index.html", "/favicon.ico", "/importmap.json",
+                "/remoteEntry.json", "/main.abc123.js", "/styles.abc123.css",
+                "/assets/logo.png", "/api/federation/vanity", "/api/federation/vanity/acme",
+                "/api/federation/capabilities", "/bff/public/announcements/login",
+                "/bff/public/appeal-contact")) {
+            assertThat(s.decide(path, "default", List.of(), List.of()))
+                .as("%s must resolve PUBLIC-allow (anonymous) in the dev seed", path)
+                .isEqualTo(Decision.ALLOW);
+        }
+
+        // Fleet-owner + games-admin rows: governed (never NO_RULE) and gated on
+        // their granted capability, not on plain ROLE_ADMIN alone re-opening
+        // /bff/admin/** at the shorter pattern.
+        assertThat(s.decide("/bff/admin/phone-fleet/devices", "default", List.of(), List.of()))
+            .as("phone-fleet must RESOLVE to a rule in the dev seed (never NO_RULE)")
+            .isEqualTo(Decision.DENY);
+        for (String role : List.of("ROLE_FLEET_ADMIN", "ROLE_ADMIN", "ROLE_SUPERADMIN")) {
+            assertThat(s.decide("/bff/admin/phone-fleet/devices", "default", List.of("u1"), List.of(role)))
+                .as("%s must reach the fleet-owner surface in the dev seed", role)
+                .isEqualTo(Decision.ALLOW);
+        }
+        assertThat(s.decide("/games/admin/purge", "default", List.of(), List.of()))
+            .as("games-admin must RESOLVE to a rule in the dev seed (never NO_RULE)")
+            .isEqualTo(Decision.DENY);
+        assertThat(s.decide("/games/admin/purge", "default", List.of("u1"), List.of("ROLE_GAMES_ADMIN")))
+            .isEqualTo(Decision.ALLOW);
+        assertThat(s.decide("/games/admin/purge", "default", List.of("u1"), List.of("ROLE_ADMIN")))
+            .as("plain ROLE_ADMIN alone must NOT satisfy the composite games-admin row")
+            .isEqualTo(Decision.DENY);
+    }
+
     // ── Image-builder console split (build-distribution) ──────────────────────
 
     @Test
