@@ -412,15 +412,34 @@ final class CanonicalSeed {
                 // defence-in-depth and a clearer failure mode, NOT the closing of
                 // an open door.
                 //
-                // NO games-services DENY refinement — deliberately, and this is
-                // the ONE place the carrier commit 63c8952f differed. Under the
-                // current filter a `/bff/superadmin/games-services/**` allow=false
-                // row denies NOBODY (privileged principals bypass decide(); a
-                // non-privileged one is already governed-but-ungranted here), while
-                // as the LONGER pattern it would become the deciding rule and strip
-                // the MFA floor from exactly that subtree. #244's ACCEPT is stated
-                // "without the games-services deny row"; the cluster seed omits it
-                // for the identical reason.
+                // NO games-services DENY refinement HERE — and, since 2026-09-17,
+                // that is a DELIBERATE DIVERGENCE from the cluster seed rather than
+                // a shared omission. Read this before "restoring parity":
+                //   * #244's ACCEPT (decision 41) is stated "without the
+                //     games-services deny row", and decision 41 authorises exactly
+                //     ONE row here — the platform prefix above.
+                //   * the CLUSTER seed DOES carry
+                //     ('hugmesh-fe-gateway','/bff/superadmin/games-services/**',
+                //      'ROLE_SUPERADMIN',false) again, put back by operator
+                //     decision 28 = D (hugmesh-generator#347, landed 4764ab4f) with
+                //     mfa_required pinned TRUE on the row itself, which is the whole
+                //     reason D was chosen over leaving it out: isMfaRequiredSurface()
+                //     is allow-blind and reads the LONGEST match, so the deny row
+                //     carries the step-up floor for that subtree instead of stripping
+                //     it.
+                //   * a baked COPY could not reproduce that: D8 forbids
+                //     mfa_required=true on any baked row (see r() below), so the copy
+                //     would carry the wall WITHOUT the floor. What it WOULD change is
+                //     decide()'s answer on the fallback for a principal holding
+                //     ROLE_SUPERADMIN at /bff/superadmin/games-services/… — ALLOW on
+                //     the platform row today, explicit DENY with a copy — and
+                //     GatewayRouteAccessFilter short-circuits ROLE_SUPERADMIN BEFORE
+                //     decide(), so even that is inert for a live request.
+                // Whether the baked floor should mirror the D28 row is therefore NOT
+                // decided by 41 and is NOT decided here; it is recorded on #244. The
+                // measured divergence is asserted, in both repos, rather than
+                // narrated: see canonicalSeed_feGateway_superadminRow_* and
+                // hugmesh-generator's fallback-floor-parity.feature.
                 //
                 // mfaRequired STAYS false here, like every other baked row (D8).
                 // The cluster seed's flip UPDATE (`SET mfa_required = true WHERE

@@ -694,14 +694,35 @@ class GatewayRouteAccessServiceTest {
         assertThat(row.allow()).as("the row is an ALLOW grant, not a deny row").isTrue();
         assertThat(row.domain()).as("baked rows are UNSCOPED (domain=null)").isNull();
         assertThat(row.casdoorUser()).as("baked rows pin no casdoor user").isNull();
+        // TIER LABEL. forGateway() picks the tier LIST by application name and
+        // decide() never reads Rule.gateway(), so writing r(BE, …) inside fe()
+        // would leave every behavioural assertion in this class green while
+        // mislabelling the row — and Rule.gateway() and Rule.id() are what the
+        // denial log and the admin console print. Pinned so the mislabel is red.
+        assertThat(row.gateway())
+            .as("the row must be LABELLED fe — r(BE, …) inside fe() is behaviourally "
+              + "null but mislabels every log line and the rule id")
+            .isEqualTo("hugmesh-fe-gateway");
+        assertThat(row.id())
+            .as("seed rule ids are seed:<gateway>:<pattern>:<role>")
+            .isEqualTo("seed:hugmesh-fe-gateway:/bff/superadmin/**:ROLE_SUPERADMIN");
 
-        // NO games-services DENY refinement. The carrier commit 63c8952f paired the
-        // allow row with ('hugmesh-fe-gateway','/bff/superadmin/games-services/**',
-        // 'ROLE_SUPERADMIN',false). #244's ACCEPT is stated WITHOUT it, and the
-        // cluster seed omits it for the same measured reason: under the current
-        // filter it denies nobody, while as the LONGER pattern it would become the
-        // deciding rule and strip the MFA floor from exactly that subtree. The
-        // hasSize(1) above already fails if it reappears; this states why.
+        // NO games-services DENY refinement in the BAKED floor — a DELIBERATE
+        // DIVERGENCE from the cluster seed, not a shared omission. The carrier
+        // commit 63c8952f paired the allow row with ('hugmesh-fe-gateway',
+        // '/bff/superadmin/games-services/**','ROLE_SUPERADMIN',false); #244's
+        // ACCEPT is stated WITHOUT it, and decision 41 authorises exactly one row
+        // here. The CLUSTER seed has carried that deny row again since 2026-09-17
+        // (operator decision 28 = D, hugmesh-generator 4764ab4f) with mfa_required
+        // pinned TRUE on the row itself. A baked copy could not reproduce that —
+        // D8 forbids mfa_required=true on any baked row — so it would carry the
+        // wall without the floor; what it WOULD change is decide()'s answer for a
+        // ROLE_SUPERADMIN on the fallback (ALLOW here, explicit DENY with a copy),
+        // which GatewayRouteAccessFilter never consults because it short-circuits
+        // that role first. Whether to mirror it is not decided by 41 and is
+        // recorded on #244. The hasSize(1) above fails if it appears here; the
+        // divergence itself is asserted in hugmesh-generator's
+        // fallback-floor-parity.feature, which reads BOTH files.
         assertThat(fe)
             .as("no /bff/superadmin/games-services/** refinement row (it would strip the MFA floor)")
             .noneMatch(r -> r.urlPattern().startsWith("/bff/superadmin/games-services"));
