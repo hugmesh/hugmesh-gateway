@@ -608,6 +608,126 @@ class GatewayRouteAccessServiceTest {
                 List.of("ROLE_USER", "ROLE_FLEET_ADMIN"))).isEqualTo(Decision.DENY);
     }
 
+    // ── #244 ACCEPT (decision 41): the superadmin platform console at the fe door ─
+
+    @Test
+    void canonicalSeed_feGateway_superadminPlatformDoor_isGovernedNotUngoverned() {
+        // THE BEHAVIOUR THIS ROW EXISTS FOR, and the assertion that goes RED the
+        // moment it is reverted. Before the row NO fe pattern matched
+        // /bff/superadmin/… at all (measured on main @ 13f1651d: the class held
+        // FOUR ROLE_SUPERADMIN rules — pki `/**`, be `/bff/image-builds/arch/**`,
+        // be `/bff/superadmin/**`, fe `/bff/admin/phone-fleet/**` — and NONE of
+        // them on the fe superadmin prefix), so decide() answered NO_RULE and the
+        // filter FORWARDED on the coarse authenticated() floor. NO_RULE is not a
+        // refusal; it is a forward with no X-Route-Denied header and nothing in the
+        // gateway's denial log.
+        //
+        // DENY vs NO_RULE is the whole discriminator here: delete the row and the
+        // first assertion below reads NO_RULE, not DENY.
+        var seed = CanonicalSeed.forGateway("hugmesh-fe-gateway");
+        var s = new GatewayRouteAccessService(null, null, "hugmesh-fe-gateway", true, false, null);
+        s.primeForTest(seed);
+
+        // A logged-in principal that is not superadmin: governed-but-ungranted ⇒ DENY
+        // AT THE DOOR (not a forward into admin-bff's own hasRole("SUPERADMIN")).
+        for (String path : List.of("/bff/superadmin/service-store/catalog",
+                                   "/bff/superadmin/workloads",
+                                   "/bff/superadmin/games-services/catalog",
+                                   "/bff/superadmin/fleet-entitlements/x",
+                                   "/bff/superadmin/phone-devices/1/owner")) {
+            assertThat(s.decide(path, "default", List.of("u1"), List.of("ROLE_USER")))
+                .as("%s must be GOVERNED by the baked fe floor (DENY), never NO_RULE/forward", path)
+                .isEqualTo(Decision.DENY);
+        }
+
+        // ROLE_SUPERADMIN is the granting role at this layer.
+        assertThat(s.decide("/bff/superadmin/service-store/catalog", "default", List.of("u1"),
+                List.of("ROLE_SUPERADMIN")))
+            .as("ROLE_SUPERADMIN holds the granting row on the superadmin platform prefix")
+            .isEqualTo(Decision.ALLOW);
+
+        // A per-domain ROLE_ADMIN holds NO granting row here — the seed does NOT
+        // pair ROLE_ADMIN on this prefix. (GatewayRouteAccessFilter short-circuits
+        // admin/superadmin BEFORE decide() is consulted, so this layer's answer is
+        // not what a live admin request experiences; that residual is documented on
+        // the row and unchanged by it. This assertion pins the TABLE, so a later
+        // "admins are a superset" pairing cannot be added here unnoticed.)
+        assertThat(s.decide("/bff/superadmin/service-store/catalog", "default", List.of("u1"),
+                List.of("ROLE_USER", "ROLE_ADMIN")))
+            .as("plain ROLE_ADMIN must NOT hold a granting row on /bff/superadmin/**")
+            .isEqualTo(Decision.DENY);
+
+        // The new row must not swallow its SIBLING prefixes: /bff/admin/** keeps its
+        // ROLE_ADMIN floor and the fleet sub-path keeps its ROLE_FLEET_ADMIN grant.
+        assertThat(s.decide("/bff/admin/announcements", "default", List.of("u1"),
+                List.of("ROLE_ADMIN")))
+            .as("/bff/admin/** must still be granted to ROLE_ADMIN")
+            .isEqualTo(Decision.ALLOW);
+        assertThat(s.decide("/bff/admin/phone-fleet/devices", "default", List.of("u1"),
+                List.of("ROLE_USER", "ROLE_FLEET_ADMIN")))
+            .as("the fleet-owner sub-path must still be granted to ROLE_FLEET_ADMIN")
+            .isEqualTo(Decision.ALLOW);
+        // ...and a path that merely SHARES the prefix string is not captured: Ant
+        // `/bff/superadmin/**` matches the prefix itself and its subpaths only.
+        assertThat(s.decide("/bff/superadmins-club", "default", List.of("u1"), List.of("ROLE_USER")))
+            .as("/bff/superadmin/** must not capture /bff/superadmins-club")
+            .isEqualTo(Decision.NO_RULE);
+    }
+
+    @Test
+    void canonicalSeed_feGateway_superadminRow_shapeMatchesTheClusterSeed_andCarriesNoGamesServicesRefinement() {
+        // ROW-SHAPE PIN (the dual-write half). The cluster Postgres seed carries
+        //   ('hugmesh-fe-gateway','/bff/superadmin/**','ROLE_SUPERADMIN',true)
+        // in generator specs/cluster/manifests/route-access/initdb/20-schema.sql.
+        // This asserts the baked copy is that row and nothing else, so a drift in
+        // either direction is a red test rather than a silent divergence.
+        var fe = CanonicalSeed.forGateway("hugmesh-fe-gateway");
+        var superadminRows = fe.stream()
+                .filter(r -> r.urlPattern().startsWith("/bff/superadmin"))
+                .toList();
+        assertThat(superadminRows)
+            .as("the fe floor must carry EXACTLY one /bff/superadmin row — the platform-prefix grant")
+            .hasSize(1);
+        var row = superadminRows.get(0);
+        assertThat(row.urlPattern()).isEqualTo("/bff/superadmin/**");
+        assertThat(row.role()).isEqualTo("ROLE_SUPERADMIN");
+        assertThat(row.allow()).as("the row is an ALLOW grant, not a deny row").isTrue();
+        assertThat(row.domain()).as("baked rows are UNSCOPED (domain=null)").isNull();
+        assertThat(row.casdoorUser()).as("baked rows pin no casdoor user").isNull();
+
+        // NO games-services DENY refinement. The carrier commit 63c8952f paired the
+        // allow row with ('hugmesh-fe-gateway','/bff/superadmin/games-services/**',
+        // 'ROLE_SUPERADMIN',false). #244's ACCEPT is stated WITHOUT it, and the
+        // cluster seed omits it for the same measured reason: under the current
+        // filter it denies nobody, while as the LONGER pattern it would become the
+        // deciding rule and strip the MFA floor from exactly that subtree. The
+        // hasSize(1) above already fails if it reappears; this states why.
+        assertThat(fe)
+            .as("no /bff/superadmin/games-services/** refinement row (it would strip the MFA floor)")
+            .noneMatch(r -> r.urlPattern().startsWith("/bff/superadmin/games-services"));
+
+        // D8: the BAKED floor never demands a second factor. mfa_required=true is
+        // written ONLY by the cluster seed's flip UPDATE
+        //   SET mfa_required = true WHERE allow AND url_pattern LIKE '/bff/superadmin/%'
+        // onto the POSTGRES copy. Reaching that row is the gain #244 was decided
+        // for — isMfaRequiredSurface() returns false for an UNGOVERNED path, so
+        // before the Postgres row the privileged step-up floor had nothing at the
+        // public browser door to attach to.
+        assertThat(row.mfaRequired())
+            .as("the baked floor carries mfa_required=false (D8) — the flip lives in Postgres")
+            .isFalse();
+        // ...and the ACCEPTED RESIDUAL, pinned rather than narrated: on the
+        // datastore-unreachable fallback the MFA floor DROPS on this prefix while
+        // role gating still applies. The schema file states this out loud; if the
+        // baked floor is ever given mfa_required=true this assertion goes red and
+        // the change has to be argued, not slipped in.
+        var s = new GatewayRouteAccessService(null, null, "hugmesh-fe-gateway", true, false, null);
+        s.primeForTest(fe);
+        assertThat(s.isMfaRequiredSurface("/bff/superadmin/service-store/catalog", "default"))
+            .as("fallback floor: the superadmin door is role-gated but NOT MFA-gated")
+            .isFalse();
+    }
+
     @Test
     void canonicalSeed_feGateway_rootIsPublic() {
         var seed = CanonicalSeed.forGateway("hugmesh-fe-gateway");

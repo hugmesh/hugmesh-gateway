@@ -378,6 +378,63 @@ final class CanonicalSeed {
                 r(FE, "/bff/admin/phone-fleet/**", "ROLE_ADMIN"),
                 r(FE, "/bff/admin/phone-fleet/**", "ROLE_SUPERADMIN"),
                 r(FE, "/bff/admin/**",      "ROLE_ADMIN"),
+                // ── SUPERADMIN PLATFORM CONSOLE at the PUBLIC BROWSER DOOR ────
+                // #244 = ACCEPT (decision 41, 2026-09-17). This is the DUAL-WRITE
+                // PARTNER of the cluster Postgres seed row
+                //   ('hugmesh-fe-gateway','/bff/superadmin/**','ROLE_SUPERADMIN',true)
+                // in generator specs/cluster/manifests/route-access/initdb/20-schema.sql,
+                // which landed FIRST and names this file as the half still missing.
+                // The two halves must stay in lockstep: without this row the
+                // datastore-unreachable fallback is WEAKER than the Postgres rules
+                // on the highest-value surface the public browser door fronts.
+                //
+                // WHAT IT CHANGES on the fallback, for one request by an
+                // authenticated principal that is NOT admin/superadmin:
+                //   BEFORE  no fe pattern matched /bff/superadmin/… at all, so
+                //           decide() returned NO_RULE (ungoverned) and the filter
+                //           FORWARDED on the coarse authenticated() floor. The
+                //           refusal still happened — admin-bff's own
+                //           SecurityConfig `pathMatchers("/bff/superadmin/**")
+                //           .hasRole("SUPERADMIN")` — but one layer in, with NO
+                //           X-Route-Denied header, nothing in the gateway's denial
+                //           log, and the request crossing the namespace boundary.
+                //   AFTER   this is the longest matching pattern, the caller holds
+                //           no granting row at that length ⇒ governed-but-ungranted
+                //           ⇒ DENY at the door, 403 WITH
+                //           `X-Route-Denied: hugmesh-fe-gateway:<path>`.
+                // The status code does NOT move; the layer, the header and the log do.
+                //
+                // WHAT IT DOES *NOT* CHANGE. ROLE_ADMIN and ROLE_SUPERADMIN
+                // short-circuit in GatewayRouteAccessFilter BEFORE decide() is
+                // consulted, so no row here alters what a privileged principal
+                // reaches: a plain ROLE_ADMIN still arrives at admin-bff and is
+                // still refused there by hasRole("SUPERADMIN"). This is
+                // defence-in-depth and a clearer failure mode, NOT the closing of
+                // an open door.
+                //
+                // NO games-services DENY refinement — deliberately, and this is
+                // the ONE place the carrier commit 63c8952f differed. Under the
+                // current filter a `/bff/superadmin/games-services/**` allow=false
+                // row denies NOBODY (privileged principals bypass decide(); a
+                // non-privileged one is already governed-but-ungranted here), while
+                // as the LONGER pattern it would become the deciding rule and strip
+                // the MFA floor from exactly that subtree. #244's ACCEPT is stated
+                // "without the games-services deny row"; the cluster seed omits it
+                // for the identical reason.
+                //
+                // mfaRequired STAYS false here, like every other baked row (D8).
+                // The cluster seed's flip UPDATE (`SET mfa_required = true WHERE
+                // allow AND url_pattern LIKE '/bff/superadmin/%'`) reaches the
+                // POSTGRES copy of this row, and reaching it is the gain #244 was
+                // decided for — isMfaRequiredSurface() returns false for an
+                // UNGOVERNED path (GatewayRouteAccessService "if (bestLen < 0)
+                // return false"), so before the Postgres row the privileged step-up
+                // floor had nothing at the public door to hang on. The baked floor
+                // deliberately does NOT carry mfa_required=true (the schema file
+                // says so out loud), so a dual-DB outage drops MFA enforcement on
+                // these prefixes while role gating still applies. That is the
+                // documented, accepted residual — not an oversight of this row.
+                r(FE, "/bff/superadmin/**", "ROLE_SUPERADMIN"),
                 // Character Forge (OPTIONAL slug `character-forge`): the 3D
                 // character-maker remote (/character-forge/** UI shell,
                 // StripPrefix'd to the character-forge-ui nginx) and its BFF
