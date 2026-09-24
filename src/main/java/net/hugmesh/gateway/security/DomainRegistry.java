@@ -51,9 +51,9 @@ import java.util.Map;
  * mint; {@link #reloadHostsFile()} re-reads it on a fixed delay and swaps the
  * effective map atomically. Only {@code .onion} keys are accepted from the file
  * (it is written by a node process, not by the operator), and a file line never
- * overrides a key the operator set in {@code app.tenancy.hosts}. Once a host map
- * is configured at all (literal OR file) or the registry is multi-issuer, an
- * UNMAPPED {@code .onion} Host resolves to {@code null} — fail CLOSED, so a
+ * overrides a key the operator set in {@code app.tenancy.hosts}. Once onion
+ * tenancy is configured (the file path is set, or the literal maps a named
+ * onion), an UNMAPPED {@code .onion} Host resolves to {@code null} — fail CLOSED, so a
  * mis-registered onion can never be served as another brand — instead of
  * collapsing to {@link #DEFAULT_DOMAIN} like an unmapped HTTPS host does.
  */
@@ -84,10 +84,16 @@ public class DomainRegistry {
     private final String singleIssuer;
     /** {@code app.tenancy.hosts-file}; {@code null} when not configured. */
     private final Path hostsFile;
-    /** True iff a host map was configured (literal non-blank OR a file path set).
-     *  Deliberately NOT {@code !hostToDomain.isEmpty()}: with a file configured but
-     *  nothing appended yet, the map IS empty and an onion must still fail closed. */
-    private final boolean hostMapConfigured;
+    /** True iff ONION tenancy is configured: the runtime file path is set (onions
+     *  are registrable) OR the operator's literal already maps a named onion (onions
+     *  are registered). Deliberately NOT {@code !hostToDomain.isEmpty()}: with the
+     *  file configured but nothing appended yet the map IS empty, and an onion must
+     *  still fail closed. Deliberately NOT "any host map / multi-issuer" either:
+     *  the compose BRAND_B=1 lane and Studio's own-Casdoor domains already set
+     *  APP_TENANCY_HOSTS/ISSUERS on hugmesh-fe-gateway, and their ONE onion door
+     *  (TOR=1) is the mesh's default-brand door; failing it closed before anything
+     *  can register an onion would turn a working door into a permanent 403. */
+    private final boolean onionTenancyConfigured;
     /** Raw content of the last successful file read ({@code null} = absent/never
      *  read), so an unchanged poll re-parses nothing and swaps nothing. */
     private String lastFileContent;
@@ -128,8 +134,8 @@ public class DomainRegistry {
         this.literalHosts = Collections.unmodifiableMap(literal);
         this.hostToDomain = this.literalHosts;
         this.hostsFile = (hostsFile == null || hostsFile.isBlank()) ? null : Path.of(hostsFile.trim());
-        this.hostMapConfigured = (hostsCsv != null && !hostsCsv.isBlank())
-                || this.hostsFile != null;
+        this.onionTenancyConfigured = this.hostsFile != null
+                || literal.keySet().stream().anyMatch(DomainRegistry::isNamedOnion);
         // Prime synchronously so the first request after startup already sees the
         // file's entries (the scheduled poll only keeps it current afterwards).
         reloadHostsFile();
@@ -241,14 +247,16 @@ public class DomainRegistry {
      * by exact host first, then by registered suffix (e.g. {@code api.brandx.tld}
      * resolves through a {@code brandx.tld} suffix entry).
      *
-     * <p><b>Unmapped onion → {@code null} (fail CLOSED).</b> When a host map is
-     * configured (literal or file) or the registry is multi-issuer, a Host ending
-     * in {@code .onion} that no entry maps returns {@code null}, never
-     * {@code "default"}: an onion is one brand's door, and collapsing an
+     * <p><b>Unmapped onion → {@code null} (fail CLOSED).</b> When onion tenancy is
+     * configured — {@code app.tenancy.hosts-file} is set, or the literal
+     * {@code app.tenancy.hosts} maps at least one named onion — a Host ending in
+     * {@code .onion} that no entry maps returns {@code null}, never
+     * {@code "default"}: once onions are per-brand doors, collapsing an
      * unregistered one to the default brand would serve brand A over brand B's
-     * onion. The caller must reject. With NO host map and a single issuer there is
-     * only one brand, so an onion stays {@code "default"} (the compose lane's lone
-     * onion door keeps working).
+     * onion. The caller must reject. Without onion tenancy there is at most ONE
+     * onion (the mesh's own door, which is the default brand's), so an onion keeps
+     * resolving like any unmapped host — {@code "default"} — and the compose lane's
+     * door keeps working with or without BRAND_B / own-Casdoor domains.
      */
     public String domainForHost(String host) {
         Map<String, String> map = hostToDomain;   // one snapshot for the whole lookup
@@ -266,10 +274,9 @@ public class DomainRegistry {
         return DEFAULT_DOMAIN;
     }
 
-    /** Whether an unmapped onion must fail closed: some host map was configured,
-     *  or several brands' issuers are trusted. */
+    /** Whether an unmapped onion must fail closed — see {@link #onionTenancyConfigured}. */
     private boolean onionFailsClosed() {
-        return hostMapConfigured || isMultiIssuer();
+        return onionTenancyConfigured;
     }
 
     /** True iff this issuer is trusted (resolves to a non-null domain). */

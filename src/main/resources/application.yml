@@ -72,9 +72,10 @@ app:
     # written by the node's Tor reconcile / admin-bff after it mints an onion — an
     # onion name cannot be a config-time literal above. Only .onion keys are read
     # from it and it never overrides a host set in `hosts`. It may be a mounted
-    # ConfigMap key. Once `hosts` or this path is set (or several issuers are
-    # trusted) an UNMAPPED .onion Host is denied 403 instead of served as
-    # "default". Empty => no runtime source (single-brand onions stay "default").
+    # ConfigMap key. Once this path is set (or `hosts` maps a named onion) an
+    # UNMAPPED .onion Host is denied 403 instead of served as "default". Empty (and
+    # no onion in `hosts`) => an onion resolves like any unmapped host, "default"
+    # (the mesh's one onion door, even on a multi-brand BRAND_B=1 stack).
     hosts-file: ${APP_TENANCY_HOSTS_FILE:}
     # How often the host-map file is re-read (content compared, swapped atomically;
     # a missing file = no runtime entries, an unreadable one keeps the last map).

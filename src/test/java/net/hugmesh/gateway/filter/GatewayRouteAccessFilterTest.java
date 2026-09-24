@@ -1428,11 +1428,13 @@ class GatewayRouteAccessFilterTest {
         }
 
         @Test
-        void unmappedOnion_defaultDomainAdmin_isDenied_andRouteAccessNeverConsulted() {
+        void unmappedOnion_defaultDomainAdmin_isDenied_andRouteAccessNeverConsulted(
+                @org.junit.jupiter.api.io.TempDir java.nio.file.Path tmp) {
             // The exact pre-fix leak: the onion collapsed to "default", and a
             // default-brand principal matched default==default and took the bypass.
+            // Onion tenancy is on (file path set, nothing registered yet).
             filter = new GatewayRouteAccessFilter(routeAccess, new net.hugmesh.gateway.security.DomainRegistry(
-                    SINGLE_ISSUER, "", "hugmesh.net=default"));
+                    SINGLE_ISSUER, "", "hugmesh.net=default", tmp.resolve("tenancy-hosts").toString()));
             Jwt admin = jwt("admin-1", List.of(Map.of("name", "admin")));
             MockServerWebExchange mwex = run("/api/admin/x", ONION_Z + ".", authFor(admin, "ADMIN"));
             assertThat(downstreamCalled).isFalse();
@@ -1454,6 +1456,23 @@ class GatewayRouteAccessFilterTest {
             MockServerWebExchange mwex = run("/", ONION_Z, null);
             assertThat(downstreamCalled).isTrue();
             assertThat(mwex.getResponse().getStatusCode()).isNotEqualTo(HttpStatus.FORBIDDEN);
+        }
+
+        @Test
+        void brandBComposeShape_noOnionTenancy_theMeshsOnionDoorStillServes() {
+            // NO-REGRESSION pin for BRAND_B=1 TOR=1 (Makefile STACK_BRAND_B_ENV threads
+            // these two env vars into hugmesh-fe-gateway, the onion's upstream).
+            filter = new GatewayRouteAccessFilter(routeAccess, new net.hugmesh.gateway.security.DomainRegistry(
+                    SINGLE_ISSUER,
+                    SINGLE_ISSUER + "=default,http://casdoor-brandb:8000=brandb",
+                    "brandb.localtest.me=brandb"));
+            when(routeAccess.decide(any(), any(), any(), any())).thenReturn(Decision.NO_RULE);
+            run("/", ONION_Z, null);
+            assertThat(downstreamCalled).as("anonymous over the mesh's onion").isTrue();
+            downstreamCalled.set(false);
+            Jwt user = jwt("user-1", List.of(Map.of("name", "user")));
+            run("/api/social/feed", ONION_Z, authFor(user));
+            assertThat(downstreamCalled).as("a default-brand user over the mesh's onion").isTrue();
         }
 
         @Test

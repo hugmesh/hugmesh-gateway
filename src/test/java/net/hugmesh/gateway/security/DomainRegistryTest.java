@@ -194,22 +194,34 @@ class DomainRegistryTest {
         }
 
         @Test
-        void unmappedOnion_singleBrandWithAHostMap_stillFailsClosed() {
-            // Single issuer but a host map is configured: the operator has declared
-            // host-based tenancy, so an unregistered onion is not "the" brand.
-            DomainRegistry reg = new DomainRegistry("http://casdoor:8000", "",
-                    "hugmesh.net=default");
-            assertThat(reg.isMultiIssuer()).isFalse();
-            assertThat(reg.domainForHost(ONION_Z)).isNull();
+        void httpsOnlyHostMap_noOnionTenancy_theMeshsOneOnionStaysDefault() {
+            // NO-REGRESSION: the compose BRAND_B=1 lane (Makefile STACK_BRAND_B_ENV)
+            // and Studio's own-Casdoor domains set APP_TENANCY_ISSUERS/_HOSTS on
+            // hugmesh-fe-gateway, which is also the TOR=1 onion's upstream. Nothing
+            // can register an onion yet, so that one onion (the mesh's default-brand
+            // door) must keep resolving to "default", not start 403ing.
+            DomainRegistry reg = new DomainRegistry("http://casdoor:8000",
+                    "http://casdoor:8000=default,http://casdoor-brandb:8000=brandb",
+                    "brandb.localtest.me=brandb");
+            assertThat(reg.isMultiIssuer()).isTrue();
+            assertThat(reg.domainForHost(ONION_Z)).isEqualTo(DomainRegistry.DEFAULT_DOMAIN);
         }
 
         @Test
-        void unmappedOnion_multiIssuerWithoutAnyHostMap_failsClosed() {
+        void multiIssuerWithoutAnyHostMap_noOnionTenancy_onionStaysDefault() {
             DomainRegistry reg = new DomainRegistry("https://id.brandx.tld", ISSUERS, "");
             assertThat(reg.isMultiIssuer()).isTrue();
+            assertThat(reg.domainForHost(ONION_Z)).isEqualTo(DomainRegistry.DEFAULT_DOMAIN);
+        }
+
+        @Test
+        void aLiteralOnionEntryAlone_engagesOnionTenancy() {
+            // An operator who hand-maps one onion has declared onions per-brand: any
+            // OTHER onion is unregistered and fails closed, even with no file.
+            DomainRegistry reg = new DomainRegistry("http://casdoor:8000", "",
+                    ONION_X + "=default");
+            assertThat(reg.domainForHost(ONION_X)).isEqualTo(DomainRegistry.DEFAULT_DOMAIN);
             assertThat(reg.domainForHost(ONION_Z)).isNull();
-            // ordinary hosts on that registry are unchanged ("default")
-            assertThat(reg.domainForHost("api.brandx.tld")).isEqualTo(DomainRegistry.DEFAULT_DOMAIN);
         }
 
         @Test
@@ -299,6 +311,7 @@ class DomainRegistryTest {
                     f.toString());
             assertThat(reg.domainForHost("api.brandx.tld")).isEqualTo(DomainRegistry.DEFAULT_DOMAIN);
             assertThat(reg.domainForHost(ONION_Z)).as("no catch-all onion entry").isNull();
+            assertThat(reg.domainForHost(".onion")).as("the '.onion' line was not registered").isNull();
             assertThat(reg.domainForHost(ONION_X)).isEqualTo("brandx");
         }
 

@@ -313,12 +313,15 @@ never a user-settable claim.
   `app.tenancy.hosts-file-refresh-ms` (default 5 s, content-compared, swapped
   atomically); a missing file means no runtime entries, an unreadable one keeps the
   last-known-good map. Only `.onion` keys are accepted from the file and a file line
-  never overrides a host set in `app.tenancy.hosts`. Once any host map is
-  configured (literal **or** file) or the registry is multi-issuer, an **unmapped
-  `.onion` Host is denied 403** (`X-Route-Denied`) for every caller — anonymous and
-  superadmin included — instead of collapsing to `default`, so an unregistered onion
-  can never serve another brand. With no host map and a single issuer there is one
-  brand and an onion stays `default`. The mapping is routing, not isolation: Tor
+  never overrides a host set in `app.tenancy.hosts`. Once **onion tenancy** is
+  configured — the file path is set, or `app.tenancy.hosts` maps a named onion — an
+  **unmapped `.onion` Host is denied 403** (`X-Route-Denied`) for every caller —
+  anonymous and superadmin included — instead of collapsing to `default`, so an
+  unregistered onion can never serve another brand. Without onion tenancy there is
+  at most one onion (the mesh's own door, the default brand's) and it resolves like
+  any unmapped host, to `default` — even when `APP_TENANCY_HOSTS`/`_ISSUERS` are set
+  for HTTPS brands (the compose `BRAND_B=1` lane and Studio's own-Casdoor domains
+  set them on `hugmesh-fe-gateway`, whose `TOR=1` onion door must keep working). The mapping is routing, not isolation: Tor
   forwards whatever `Host` the client sends, so a client can still name another
   brand's HTTPS host over any onion; per-brand isolation remains the issuer-derived
   domain check below. Writing the file is not done here — the node/compose half is

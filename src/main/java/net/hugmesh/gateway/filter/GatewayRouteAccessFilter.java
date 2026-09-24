@@ -235,8 +235,8 @@ public class GatewayRouteAccessFilter implements WebFilter, Ordered {
         String path = exchange.getRequest().getPath().value();
         if (requestDomain == null) {
             // UNREGISTERED ONION (hugmesh-gateway#38). The registry answers null
-            // only for a `.onion` Host no entry maps while a host map / multi-brand
-            // registry is configured. Fail CLOSED for EVERY caller — anonymous,
+            // only for a `.onion` Host no entry maps while ONION tenancy is
+            // configured (a runtime host-map file, or a literal onion entry). Fail CLOSED for EVERY caller — anonymous,
             // superadmin included — BEFORE the anonymous fast-path and both
             // bypasses: there is no brand to serve, and collapsing to "default"
             // would serve brand A's surface over brand B's onion. This is not a
@@ -569,9 +569,10 @@ public class GatewayRouteAccessFilter implements WebFilter, Ordered {
      * to the request URI host) mapped through the registry's host-suffix table.
      * Returns {@code "default"} when single-issuer OR an ordinary host is unmapped,
      * so single-tenant clusters always match. Returns {@code null} — and the
-     * caller REJECTS — for an unmapped {@code .onion} Host on a gateway with a host
-     * map or a multi-brand registry ({@link DomainRegistry#domainForHost}); that
-     * null is deliberately NOT coalesced to {@code "default"} (hugmesh-gateway#38). The Host check is defense-in-depth:
+     * caller REJECTS — for an unmapped {@code .onion} Host on a gateway with onion
+     * tenancy configured ({@link DomainRegistry#domainForHost}); that null is
+     * deliberately NOT coalesced to {@code "default"} (hugmesh-gateway#38). The
+     * Host check is defense-in-depth:
      * per-brand gateway INSTANCES (each serving only its own Host + selecting only
      * its own rows {@code WHERE gateway=:gw}) are the primary isolation; this
      * denies a token minted for brand-Y presented to brand-X's gateway even if
