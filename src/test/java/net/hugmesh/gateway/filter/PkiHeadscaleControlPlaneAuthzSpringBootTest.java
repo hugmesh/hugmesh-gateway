@@ -15,61 +15,72 @@ import org.springframework.test.web.reactive.server.WebTestClient;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RestController;
 import reactor.core.publisher.Mono;
+import net.hugmesh.gateway.config.SecurityConfig;
 import net.hugmesh.gateway.testsupport.TestIssuer;
 
 import java.util.List;
 
+import static org.assertj.core.api.Assertions.assertThat;
+
 /**
- * END-TO-END route-access keystone for the PKI gateway's headscale control plane
- * (bug #15) — drives REAL RSA-signed JWTs through the FULL production stack (the
- * OAuth2 resource-server authentication, the {@code SecurityWebFilterChain}, AND the
- * principal-dependent {@link GatewayRouteAccessFilter}) under the
- * {@code hugmesh-pki-gateway} instance name, so the REAL {@code CanonicalSeed.pki()}
- * fallback is the authority (no datastore wired ⇒ the in-memory canonical seed is the
- * enforced rule set, exactly as it is at runtime for the pki gateway).
+ * END-TO-END authorization keystone for the PKI gateway's headscale control plane
+ * (bug #15, then decision 79 = B on hugmesh-admin-bff-api#57, 2026-09-23) — drives
+ * REAL RSA-signed JWTs through the FULL production stack (the OAuth2 resource-server
+ * authentication, the {@code SecurityWebFilterChain}, AND the principal-dependent
+ * {@link GatewayRouteAccessFilter}) under the {@code hugmesh-pki-gateway} instance
+ * name, with a {@code headscale} route declared exactly the way
+ * hugmesh-pki-gateway's {@code application-pki.yml} declares it: a {@code Host}
+ * predicate and NO {@code Path} predicate.
  *
- * <p><b>The bug.</b> The pki gateway also fronts the cross-domain headscale control
- * plane on its own Host (pki-gateway {@code application-pki.yml}: the {@code headscale}
- * route is matched by {@code Host=scale.hugmesh.net} with NO Path predicate).
- * Before the fix {@code CanonicalSeed.pki()} seeded ONLY {@code /api/auth/** → ROLE_USER},
- * {@code /login/** → PUBLIC} and {@code /.well-known/** → PUBLIC}, so a headscale
- * control-plane path matched NO rule → {@link net.hugmesh.gateway.cache.GatewayRouteAccessService.Decision#NO_RULE}
- * → the {@link GatewayRouteAccessFilter} FORWARDED, and ANY authenticated same-domain
- * ROLE_USER reached the superadmin-tier headscale control plane. The fix adds a
- * {@code /** → ROLE_SUPERADMIN} catch-all; longest-pattern-match keeps the three rows
- * above intact for their own paths while everything else (headscale) floors to
- * SUPERADMIN.
+ * <p><b>What decision 79 = B changed.</b> headscale used to be floored by a bare
+ * {@code /** -> ROLE_SUPERADMIN} row in {@code CanonicalSeed.pki()}. That row stopped
+ * ordinary users, moderators and other-brand admins, but NOT a same-brand
+ * {@code ROLE_ADMIN} / {@code ROLE_GAME-MASTER}: {@link GatewayRouteAccessFilter}
+ * forwards those two in their own domain BEFORE any rule is read. The row is gone;
+ * {@code SecurityConfig} now requires {@code ROLE_SUPERADMIN} for EVERY request whose
+ * {@code Host} matches the headscale route's own Host predicate, as the FIRST
+ * {@code authorizeExchange} rule — ahead of {@code PUBLIC_PATHS}, so no path on that
+ * Host is public. Anonymous gets 401, every other authenticated principal 403.
  *
- * <p><b>Why a full {@code @SpringBootTest} and not an {@code ExchangeWithPrincipal}
- * slice.</b> A hand-decorated exchange ALWAYS exposes the principal, so a slice would
- * PASS vacuously regardless of the rule (and regardless of the filter ordering). Only
- * a real boot exercising the genuine {@code WebHttpHandlerBuilder}-merged filter order
- * — now correct after the merged ordering fix (the gateway WebFilters run AFTER Spring
- * Security at positive orders) — proves the seed row is actually ENFORCED on a real
- * request. Same recipe as {@link PrincipalFilterChainOrderingSpringBootTest} /
- * {@code ControlPlaneWriteAuthzSpringBootTest}.
+ * <p><b>Which layer answered.</b> A deny from the SecurityConfig host gate carries NO
+ * {@code X-Route-Denied} header (that header is only ever written by
+ * {@link GatewayRouteAccessFilter}), so {@code doesNotExist("X-Route-Denied")} on a 403
+ * is the proof the host gate fired rather than the route-access layer.
  *
- * <p><b>Fail-first proof.</b> {@link #headscaleControlPlane_roleUser_is403_superadminGateFires}
- * is the headline DENY: with the {@code /** → ROLE_SUPERADMIN} row REMOVED the headscale
- * path is NO_RULE → forwarded → the probe handler returns 200 and this assertion goes
- * RED; with the row present the same-tenant ROLE_USER is governed-but-ungranted → 403 +
- * {@code X-Route-Denied} → GREEN. The positive controls (SUPERADMIN forwarded;
- * {@code /api/auth/**} still ROLE_USER; {@code /login/**} + {@code /.well-known/**} still
- * PUBLIC) prove the row is NOT a blanket lockdown and the three pre-existing rows are
- * NOT over-broadened.
+ * <p><b>RED on origin/main 22663fe</b> (before the host gate): the same-brand
+ * {@code ROLE_ADMIN} and {@code ROLE_GAME-MASTER} cases were FORWARDED (200) by the
+ * filter's own-domain bypass, and the anonymous {@code /api/auth/**} request on the
+ * headscale Host was FORWARDED (200) by the {@code PUBLIC_PATHS} permitAll.
  *
- * <p>Categories per the comprehensive test standard: the ROLE_USER-on-headscale 403 is
- * CROSS-USER / CROSS-TIER DENY (the infra-control-plane privilege boundary); the
- * SUPERADMIN forward + the {@code /api/auth/**} ROLE_USER forward are USER-SITUATIONAL
- * ALLOW; the anonymous-public forwards are PUBLIC-floor preservation (no over-broadening).
+ * <p>Why a full {@code @SpringBootTest}: a hand-decorated exchange always exposes the
+ * principal, so a slice would pass vacuously; only a real boot exercises the genuine
+ * merged filter order AND the real {@code GatewayProperties} binding the host is
+ * derived from. Same recipe as {@link PrincipalFilterChainOrderingSpringBootTest}.
  */
 @SpringBootTest(properties = {
         // Pin the gateway instance name to the PKI tier so route-access seeds
         // CanonicalSeed.pki() and that is the enforced authority (no primed rules).
         "spring.application.name=hugmesh-pki-gateway",
+        // The headscale route, shaped like hugmesh-pki-gateway application-pki.yml:40-43
+        // (Host predicate, no Path). Index 0 on purpose: a higher-precedence source
+        // REPLACES the whole list, and an index gap would not bind. The base
+        // application.yml's api-default route is dropped in this context, which is
+        // harmless: the ProbeController (handler-mapping order 0) serves every probe
+        // path ahead of Spring Cloud Gateway's route mapping (order 1).
+        "spring.cloud.gateway.server.webflux.routes[0].id=headscale",
+        "spring.cloud.gateway.server.webflux.routes[0].uri=http://127.0.0.1:9",
+        "spring.cloud.gateway.server.webflux.routes[0].predicates[0]=Host=" + PkiHeadscaleControlPlaneAuthzSpringBootTest.HEADSCALE_HOST,
 })
 @AutoConfigureWebTestClient
 class PkiHeadscaleControlPlaneAuthzSpringBootTest {
+
+    /** The headscale Host for brand-X. Suffix-matches the {@code brandx.example} entry
+     *  in {@code app.tenancy.hosts}, so it resolves to brand-X — a brand-X admin on this
+     *  Host is SAME-tenant and reaches the filter's own-domain bypass (the case the old
+     *  row could not stop). */
+    static final String HEADSCALE_HOST = "scale.brandx.example";
+    /** brand-X's ordinary (non-headscale) Host on the same pki gateway. */
+    static final String ID_HOST = "brandx.example";
 
     /** Two in-process issuers ⇒ a genuinely multi-issuer registry; brand-X is the
      *  pki gateway's own brand for the same-tenant assertions. */
@@ -84,21 +95,16 @@ class PkiHeadscaleControlPlaneAuthzSpringBootTest {
 
     @DynamicPropertySource
     static void props(DynamicPropertyRegistry registry) {
-        // Multi-issuer mode: brand-X + brand-Y are trusted per-brand Casdoors, each
-        // validated against its in-process JWKS (no network, no live Casdoor).
         registry.add("app.tenancy.issuers",
                 () -> BRAND_X.issuerUri() + "=brandx," + BRAND_Y.issuerUri() + "=brandy");
-        // Host -> domain map so the request's target domain matches the brand-X
-        // token's issuer-derived domain (same-tenant) — otherwise the cross-tenant
-        // HARD-DENY would 403 for the WRONG reason and mask the route-access verdict.
+        // Host -> domain map (suffix match) so both brand-X hosts resolve to brandx and
+        // a brand-X token on either is same-tenant — otherwise the cross-tenant
+        // HARD-DENY would 403 for the WRONG reason and mask the verdict under test.
         registry.add("app.tenancy.hosts",
                 () -> "brandx.example=brandx,brandy.example=brandy");
         registry.add("spring.security.oauth2.resourceserver.jwt.issuer-uri", BRAND_X::issuerUri);
         registry.add("spring.security.oauth2.resourceserver.jwt.jwk-set-uri",
                 () -> BRAND_X.issuerUri() + "/.well-known/jwks.json");
-        // Route-access ENABLED so GatewayRouteAccessFilter runs its real logic against
-        // the canonical pki seed; revocation/url-registry/resource-access off + Cassandra
-        // excluded ⇒ no external services (identical recipe to the smoke test).
         registry.add("app.route-access.enabled", () -> "true");
         registry.add("app.revocation.enabled", () -> "false");
         registry.add("app.url-registry.enabled", () -> "false");
@@ -112,160 +118,173 @@ class PkiHeadscaleControlPlaneAuthzSpringBootTest {
     @Autowired
     WebTestClient http;
 
-    /** A headscale control-plane path served by the `headscale` route on the pki
-     *  gateway's scale.<domain> Host — NO Path predicate, so it is NOT covered by the
-     *  three pki rows ({@code /api/auth/**}, {@code /login/**}, {@code /.well-known/**}).
-     *  {@code /key} is headscale's noise-key endpoint; the {@code /**} catch-all is the
-     *  longest (and only) matching pki rule for it. */
+    @Autowired
+    SecurityConfig securityConfig;
+
+    /** headscale's noise-key endpoint. */
     private static final String HEADSCALE_KEY = "/key";
-    /** A second headscale control-plane path (the poll/map stream) — same NO_RULE-before-fix
-     *  shape, governed ONLY by the new {@code /**} row. */
+    /** headscale's poll/map stream. */
     private static final String HEADSCALE_MAP = "/machine/map";
 
     private static String bearer(TestIssuer issuer, String sub, List<String> roles) {
         return "Bearer " + issuer.mint(sub, roles);
     }
 
-    // ── HEADLINE DENY (bug #15) — a same-tenant ROLE_USER is 403'd on headscale ──
+    private WebTestClient.ResponseSpec get(String host, String path, String authorization) {
+        var req = http.get().uri(path).header(HttpHeaders.HOST, host);
+        if (authorization != null) req = req.header("Authorization", authorization);
+        return req.exchange();
+    }
+
+    // ── WIRING SANITY — the host really was derived from the route definition ──
 
     @Test
-    void headscaleControlPlane_roleUser_is403_superadminGateFires() {
-        // A genuinely authenticated SAME-TENANT (brand-X token on brand-X Host) plain
-        // ROLE_USER hitting a headscale control-plane path. Not superadmin, not admin,
-        // domain matches (no hard-deny) — so the request falls through to
-        // routeAccess.decide(...). The new /** → ROLE_SUPERADMIN row is the longest
-        // (only) match; the user does NOT hold ROLE_SUPERADMIN ⇒ governed-but-ungranted
-        // ⇒ DENY ⇒ 403 + X-Route-Denied.
-        //
-        // FAIL-FIRST: with the /** row REMOVED from CanonicalSeed.pki() this path is
-        // NO_RULE ⇒ forwarded ⇒ the probe handler returns 200 and this FAILS.
-        http.get().uri(HEADSCALE_KEY)
-                .header(HttpHeaders.HOST, "brandx.example")     // same tenant as the token
-                .header("Authorization", bearer(BRAND_X, "ordinary-user", List.of("user")))
-                .exchange()
+    void headscaleHost_isDerivedFromTheHeadscaleRoutesHostPredicate() {
+        // If GatewayProperties failed to bind the route (or the derivation read the
+        // wrong field), every headscale-Host assertion below would be testing the
+        // route-access layer instead — this pins that the gate is armed with exactly
+        // the route's Host pattern and nothing else.
+        assertThat(securityConfig.headscaleHostPatterns())
+            .containsExactly(HEADSCALE_HOST);
+    }
+
+    // ── HEADSCALE HOST — every non-superadmin is refused by the host gate ───────
+
+    @Test
+    void headscaleHost_roleUser_is403_byTheHostGate() {
+        for (String path : List.of(HEADSCALE_KEY, HEADSCALE_MAP)) {
+            get(HEADSCALE_HOST, path, bearer(BRAND_X, "ordinary-user", List.of("user")))
                 .expectStatus().isForbidden()
-                .expectHeader().exists("X-Route-Denied");
+                .expectHeader().doesNotExist("X-Route-Denied");
+        }
     }
 
     @Test
-    void headscaleControlPlane_roleUser_secondPath_is403() {
-        // Belt-and-suspenders: a second headscale path (the map/poll stream) is governed
-        // by the same /** floor and 403s the same ROLE_USER — proving the catch-all
-        // covers the whole headscale surface, not just the one probed endpoint.
-        http.get().uri(HEADSCALE_MAP)
-                .header(HttpHeaders.HOST, "brandx.example")
-                .header("Authorization", bearer(BRAND_X, "ordinary-user", List.of("user")))
-                .exchange()
-                .expectStatus().isForbidden()
-                .expectHeader().exists("X-Route-Denied");
+    void headscaleHost_roleMod_is403_byTheHostGate() {
+        get(HEADSCALE_HOST, HEADSCALE_KEY, bearer(BRAND_X, "a-mod", List.of("mod")))
+            .expectStatus().isForbidden()
+            .expectHeader().doesNotExist("X-Route-Denied");
     }
 
     @Test
-    void headscaleControlPlane_roleMod_is403_modIsNotSuperadmin() {
-        // A privileged-but-not-superadmin role (mod) is ALSO denied — the catch-all is
-        // SUPERADMIN, not ROLE_ADMIN/ROLE_MOD, so no per-domain elevated role reaches the
-        // cross-domain infra control plane.
-        http.get().uri(HEADSCALE_KEY)
-                .header(HttpHeaders.HOST, "brandx.example")
-                .header("Authorization", bearer(BRAND_X, "a-mod", List.of("mod")))
-                .exchange()
-                .expectStatus().isForbidden()
-                .expectHeader().exists("X-Route-Denied");
+    void headscaleHost_otherBrandAdmin_is403_byTheHostGate() {
+        // A brand-Y admin on brand-X's headscale Host. Before decision 79 the filter's
+        // cross-domain HARD-DENY answered (403 + X-Route-Denied); the host gate now
+        // refuses it one layer earlier, so the header is absent.
+        get(HEADSCALE_HOST, HEADSCALE_KEY, bearer(BRAND_Y, "brandy-admin", List.of("admin")))
+            .expectStatus().isForbidden()
+            .expectHeader().doesNotExist("X-Route-Denied");
     }
 
     @Test
-    void headscaleControlPlane_crossDomainAdmin_is403_otherBrandAdminCannotReachInfra() {
-        // THE ROLE_ADMIN-vs-ROLE_SUPERADMIN distinction (the explicit non-negotiable):
-        // an admin of ANOTHER brand must NEVER reach this brand's headscale cross-domain
-        // infra control plane. A brand-Y admin token presented to the brand-X headscale
-        // Host: the token's issuer-derived domain (brandy) does NOT match the Host-derived
-        // target (brandx), so GatewayRouteAccessFilter HARD-DENIES with 403 +
-        // X-Route-Denied BEFORE route-access — admin role does NOT save it, only
-        // SUPERADMIN crosses domains. This is the layer that keeps the cross-domain infra
-        // plane closed to per-domain admins.
-        //
-        // (A SAME-domain admin on its OWN brand's pki gateway is forwarded by the filter's
-        // in-domain admin bypass — that is by design and unchanged by this fix; the seed's
-        // /** → ROLE_SUPERADMIN row deliberately carries NO ROLE_ADMIN allow row, and the
-        // cross-DOMAIN reach an admin could abuse is what this assertion pins shut.)
-        http.get().uri(HEADSCALE_KEY)
-                .header(HttpHeaders.HOST, "brandx.example")               // brand-X headscale surface
-                .header("Authorization", bearer(BRAND_Y, "brandy-admin", List.of("admin")))
-                .exchange()
+    void headscaleHost_sameBrandAdmin_is403_theBypassNoLongerReachesHeadscale() {
+        // THE decision-79 case. A brand-X ROLE_ADMIN on brand-X's headscale Host is
+        // same-tenant, so GatewayRouteAccessFilter's own-domain admin bypass would
+        // forward it before any rule is read. RED on origin/main 22663fe: 200.
+        for (String path : List.of(HEADSCALE_KEY, HEADSCALE_MAP)) {
+            get(HEADSCALE_HOST, path, bearer(BRAND_X, "brandx-admin", List.of("admin")))
                 .expectStatus().isForbidden()
-                .expectHeader().exists("X-Route-Denied");
+                .expectHeader().doesNotExist("X-Route-Denied");
+        }
+    }
+
+    @Test
+    void headscaleHost_sameBrandGameMaster_is403_theBypassNoLongerReachesHeadscale() {
+        // Same bypass, the other role it covers. RED on origin/main 22663fe: 200.
+        get(HEADSCALE_HOST, HEADSCALE_KEY, bearer(BRAND_X, "brandx-gm", List.of("game-master")))
+            .expectStatus().isForbidden()
+            .expectHeader().doesNotExist("X-Route-Denied");
+    }
+
+    @Test
+    void headscaleHost_anonymous_is401() {
+        get(HEADSCALE_HOST, HEADSCALE_KEY, null)
+            .expectStatus().isUnauthorized();
+    }
+
+    @Test
+    void headscaleHost_anonymous_onAPublicPath_is401_theHostGateRunsBeforePublicPaths() {
+        // ORDERING DISCRIMINATOR. /api/auth/** is in SecurityConfig.PUBLIC_PATHS. On the
+        // headscale Host the host gate must win (first-match-wins in authorizeExchange),
+        // so no path on that Host is public. RED on origin/main 22663fe: 200. The id-Host
+        // twin below proves the same path IS still public off the headscale Host.
+        get(HEADSCALE_HOST, "/api/auth/whoami", null)
+            .expectStatus().isUnauthorized();
+    }
+
+    @Test
+    void headscaleHost_withPortAndMixedCase_isStillGated() {
+        // The route predicate matches the raw Host header; the gate also matches the
+        // port-stripped, lower-cased form, so it is a SUPERSET of what reaches headscale.
+        get("SCALE.BrandX.example:8443", HEADSCALE_KEY,
+                bearer(BRAND_X, "brandx-admin", List.of("admin")))
+            .expectStatus().isForbidden()
+            .expectHeader().doesNotExist("X-Route-Denied");
     }
 
     // ── POSITIVE CONTROL — SUPERADMIN reaches the headscale control plane ────────
 
     @Test
-    void headscaleControlPlane_superadmin_isForwardedToHandler_notRouteDenied() {
-        // The authorized operator of the cross-domain infra control plane. SUPERADMIN
-        // short-circuits the GatewayRouteAccessFilter's cross-domain bypass BEFORE
-        // route evaluation, so it is forwarded to the local probe handler (200) and is
-        // NOT route-access-denied. Proves the /** floor is a SUPERADMIN GATE, not a
-        // blanket lockdown of every headscale path.
-        http.get().uri(HEADSCALE_KEY)
-                .header(HttpHeaders.HOST, "brandx.example")
-                .header("Authorization", bearer(BRAND_X, "an-operator", List.of("superadmin")))
-                .exchange()
+    void headscaleHost_superadmin_isForwarded() {
+        for (String path : List.of(HEADSCALE_KEY, HEADSCALE_MAP)) {
+            get(HEADSCALE_HOST, path, bearer(BRAND_X, "an-operator", List.of("superadmin")))
                 .expectStatus().isOk()
                 .expectHeader().doesNotExist("X-Route-Denied");
+        }
     }
 
-    // ── POSITIVE CONTROLS — the three pre-existing pki rows are NOT over-broadened ──
+    // ── NON-HEADSCALE HOST on the pki tier — still governed by its own rows ─────
 
     @Test
-    void apiAuth_roleUser_stillForwarded_notBroadenedToSuperadmin() {
-        // /api/auth/** keeps its own ROLE_USER row (a LONGER, more-specific pattern than
-        // /**), so an ordinary same-tenant ROLE_USER still reaches it (200). Proves the
-        // /** catch-all did NOT swallow the auth surface up to SUPERADMIN — login/token
-        // exchange still works for ordinary users.
-        http.get().uri("/api/auth/whoami")
-                .header(HttpHeaders.HOST, "brandx.example")
-                .header("Authorization", bearer(BRAND_X, "ordinary-user", List.of("user")))
-                .exchange()
-                .expectStatus().isOk()
-                .expectHeader().doesNotExist("X-Route-Denied");
+    void idHost_anonymous_publicPath_stillForwarded() {
+        // Twin of the ordering discriminator: off the headscale Host, /api/auth/** is
+        // still anonymous-reachable (PUBLIC_PATHS) — the gate is Host-scoped, not a
+        // tier-wide lockdown.
+        get(ID_HOST, "/api/auth/whoami", null)
+            .expectStatus().isOk()
+            .expectHeader().doesNotExist("X-Route-Denied");
     }
 
     @Test
-    void login_roleUser_staysPublic_notBroadenedToSuperadmin() {
-        // /login/** keeps its own PUBLIC row (a LONGER, more-specific pattern than /**),
-        // so it is NOT swallowed by the SUPERADMIN catch-all: an ordinary same-tenant
-        // ROLE_USER reaches it (200, not route-denied) because route-access treats the
-        // longest-match PUBLIC row as ALLOW for any principal. If /** had over-broadened
-        // /login/** to SUPERADMIN this ROLE_USER would be 403'd. (Anonymous reachability
-        // of /login is governed by the coarse SecurityConfig gate, a separate layer; this
-        // assertion isolates the route-access row's non-over-broadening.)
-        http.get().uri("/login/index")
-                .header(HttpHeaders.HOST, "brandx.example")
-                .header("Authorization", bearer(BRAND_X, "ordinary-user", List.of("user")))
-                .exchange()
-                .expectStatus().isOk()
-                .expectHeader().doesNotExist("X-Route-Denied");
+    void idHost_apiAuth_roleUser_forwardedByItsRow() {
+        get(ID_HOST, "/api/auth/whoami", bearer(BRAND_X, "ordinary-user", List.of("user")))
+            .expectStatus().isOk()
+            .expectHeader().doesNotExist("X-Route-Denied");
     }
 
     @Test
-    void wellKnown_roleUser_staysPublic_notBroadenedToSuperadmin() {
-        // /.well-known/** keeps its own PUBLIC row (OIDC discovery / jwks), LONGER than
-        // /**, so it wins longest-pattern-match and an ordinary ROLE_USER reaches it
-        // (200, not route-denied). Proves the catch-all did NOT lock OIDC discovery
-        // behind SUPERADMIN.
-        http.get().uri("/.well-known/probe-openid")
-                .header(HttpHeaders.HOST, "brandx.example")
-                .header("Authorization", bearer(BRAND_X, "ordinary-user", List.of("user")))
-                .exchange()
+    void idHost_login_andWellKnown_roleUser_forwardedByTheirPublicRows() {
+        for (String path : List.of("/login/index", "/.well-known/probe-openid")) {
+            get(ID_HOST, path, bearer(BRAND_X, "ordinary-user", List.of("user")))
                 .expectStatus().isOk()
                 .expectHeader().doesNotExist("X-Route-Denied");
+        }
     }
 
-    /** Local probe controller — when the gateway filter chain FORWARDS a request it
-     *  reaches this handler (bodiless 200). A 403 from the route-access filter never
-     *  gets here. Serves the headscale probe paths AND the three pki rule paths so a
-     *  FORWARD on any of them is an unambiguous 200. A bodiless ResponseEntity avoids
-     *  the EncoderHttpMessageWriter Content-Length write on the read-only gateway
-     *  response headers (see PrincipalFilterChainOrderingSpringBootTest.ProbeController). */
+    @Test
+    void idHost_otherBrandUser_isStillHardDeniedByTheRouteAccessFilter() {
+        // The route-access layer is still in charge off the headscale Host: a brand-Y
+        // principal on brand-X's id Host is refused by the filter's cross-domain
+        // HARD-DENY, which is the layer that writes X-Route-Denied.
+        get(ID_HOST, "/api/auth/whoami", bearer(BRAND_Y, "brandy-user", List.of("user")))
+            .expectStatus().isForbidden()
+            .expectHeader().exists("X-Route-Denied");
+    }
+
+    @Test
+    void idHost_sameBrandAdmin_onAHeadscalePath_isNotHostGated() {
+        // The gate keys on Host, never on path: /key on the id Host is not headscale
+        // (no route sends it there), so a same-brand admin is forwarded by the filter's
+        // own-domain bypass exactly as before.
+        get(ID_HOST, HEADSCALE_KEY, bearer(BRAND_X, "brandx-admin", List.of("admin")))
+            .expectStatus().isOk()
+            .expectHeader().doesNotExist("X-Route-Denied");
+    }
+
+    /** Local probe controller — a FORWARDED request reaches this handler (bodiless 200).
+     *  A bodiless ResponseEntity avoids the EncoderHttpMessageWriter Content-Length write
+     *  on the read-only gateway response headers (see
+     *  PrincipalFilterChainOrderingSpringBootTest.ProbeController). */
     @TestConfiguration
     static class ProbeConfig {
         @Bean
@@ -279,7 +298,7 @@ class PkiHeadscaleControlPlaneAuthzSpringBootTest {
         @GetMapping({
                 "/key",                       // headscale noise key (control plane)
                 "/machine/map",               // headscale poll/map stream (control plane)
-                "/api/auth/whoami",           // pki ROLE_USER surface
+                "/api/auth/whoami",           // pki ROLE_USER surface (and PUBLIC_PATHS)
                 "/login/index",               // pki PUBLIC surface
                 "/.well-known/probe-openid",  // pki PUBLIC surface
         })

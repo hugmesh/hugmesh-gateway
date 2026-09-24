@@ -1070,49 +1070,42 @@ class GatewayRouteAccessServiceTest {
     }
 
     // ── DECISION 61 — the platform must not ship a '/**' row its own admin API
-    // refuses (hugmesh-admin-bff-api#57, hugmesh-generator#347, 2026-09-18) ──────
+    // refuses (hugmesh-admin-bff-api#57, hugmesh-generator#347, 2026-09-18);
+    // tightened to ZERO exceptions by decision 79 = B (2026-09-23) ──────────────
 
     @Test
-    void noSeed_shipsABareDoubleStarRow_beyondTheOneDocumentedPkiHeadscaleException() {
+    void noSeed_shipsABareDoubleStarRow_zeroExceptions() {
         // hugmesh-admin-bff-api's AdminController.addRouteRule refuses a
         // url_pattern whose first path segment is a bare wildcard ('/**' has
         // none) — an operator who deletes such a row can never recreate it
         // through the admin API. Decision 61 = refuse: the API keeps refusing
-        // it, so seeds must stop SHIPPING one.
+        // it, so seeds must not SHIP one.
         //
-        // This guard is bounded to the ONE row that could NOT be closed:
-        // pki-gateway's headscale catch-all (r(PKI, "/**", "ROLE_SUPERADMIN"),
-        // bug #15). It is genuinely open-ended — the `headscale` route in
-        // application-pki.yml matches Host=scale.hugmesh.net with NO Path
-        // predicate, so ANY path on that Host must floor to SUPERADMIN or the
-        // pre-bug-#15 hole reopens (an authenticated ROLE_USER reaching the
-        // headscale control plane). Replacing it with a finite explicit-prefix
-        // set would mean fabricating an enumeration of headscale's own HTTP
-        // surface — an external, evolving API this repo does not vendor or
-        // control, so a missed endpoint silently REOPENS #15 the next time
-        // headscale gains one — or moving the row's enforcement out of
-        // gateway_route_access into SecurityConfig, which is a materially
-        // bigger, unauthorised change (SecurityConfig.java is outside this
-        // lane's file set). Neither is done. Filed on hugmesh-admin-bff-api#57
-        // as the residual decision 61 could not settle.
+        // Decision 61 left ONE named exception: pki's headscale catch-all
+        // r(PKI, "/**", "ROLE_SUPERADMIN") (bug #15). Decision 79 = B
+        // (hugmesh-admin-bff-api#57, 2026-09-23) moved headscale's floor out of
+        // gateway_route_access into SecurityConfig — every request whose Host
+        // matches the `headscale` route's own Host predicate needs
+        // ROLE_SUPERADMIN, ahead of PUBLIC_PATHS — and dropped the row. So there
+        // is no exception left, and this guard no longer names one.
         //
-        // What this guard DOES buy: the set of bare-/** rows can never grow
-        // past this one without a test change forcing the addition to be
-        // argued, in EITHER seed this repo owns.
-        String pkiHeadscaleException = "seed:" + CanonicalSeed.PKI + ":/**:ROLE_SUPERADMIN";
-
-        for (String gateway : List.of(CanonicalSeed.PKI, CanonicalSeed.BE, CanonicalSeed.FE)) {
-            List<String> bareDoubleStarIds = CanonicalSeed.forGateway(gateway).stream()
-                    .filter(r -> "/**".equals(r.urlPattern()))
-                    .map(Rule::id)
-                    .toList();
-            assertThat(bareDoubleStarIds)
-                .as("CanonicalSeed.%s() must ship no bare /** row beyond the documented exception", gateway)
-                .allMatch(pkiHeadscaleException::equals);
+        // Scope: the three tier seeds, the per-brand suffix names that reuse
+        // them, and the compose Postgres seed. NOT in scope: bySuffix()'s
+        // unknown-name floor r(<name>, "/**", "ROLE_ADMIN"). That is a synthetic
+        // fail-CLOSED floor for a misconfigured instance name — no Postgres seed
+        // ships it and no admin ever manages it, so the admin API's refusal to
+        // recreate '/**' cannot strand it. unknownGatewayName_getsClosedDenyAllFloor_notFailOpen
+        // pins it separately.
+        for (String gateway : List.of(CanonicalSeed.PKI, CanonicalSeed.BE, CanonicalSeed.FE,
+                "brandx-pki-gateway", "brandx-be-gateway", "brandx-fe-gateway")) {
+            List<Rule> seed = CanonicalSeed.forGateway(gateway);
+            assertThat(seed)
+                .as("guard sanity: %s must resolve to a real tier seed, not an empty list", gateway)
+                .isNotEmpty();
+            assertThat(seed.stream().filter(r -> "/**".equals(r.urlPattern())).map(Rule::id).toList())
+                .as("CanonicalSeed for %s must ship NO bare /** row (decision 79 = B: zero exceptions)", gateway)
+                .isEmpty();
         }
-        assertThat(CanonicalSeed.forGateway(CanonicalSeed.PKI))
-            .as("the one documented exception must still be exactly there (not silently dropped)")
-            .anyMatch(r -> pkiHeadscaleException.equals(r.id()));
 
         Path seedSql = Path.of("compose", "route-access-seed.sql");
         assertThat(seedSql)
@@ -1126,15 +1119,20 @@ class GatewayRouteAccessServiceTest {
         }
         String rows = sql.replaceAll("(?m)--[^\n]*", "");
         var m = Pattern.compile("\\('([^']+)',\\s*'([^']*)',\\s*'([^']+)',\\s*(true|false)\\)").matcher(rows);
+        int parsed = 0;
         var bareDoubleStarInCompose = new ArrayList<String>();
         while (m.find()) {
+            parsed++;
             if ("/**".equals(m.group(2))) {
                 bareDoubleStarInCompose.add(m.group(1) + ":" + m.group(2) + ":" + m.group(3));
             }
         }
+        assertThat(parsed)
+            .as("parse sanity: a broken row regex would make the emptiness check below vacuous")
+            .isGreaterThan(40);
         assertThat(bareDoubleStarInCompose)
-            .as("compose/route-access-seed.sql must ship EXACTLY the one documented bare-/** exception")
-            .containsExactly(CanonicalSeed.PKI + ":/**:ROLE_SUPERADMIN");
+            .as("compose/route-access-seed.sql must ship NO bare /** row (decision 79 = B: zero exceptions)")
+            .isEmpty();
     }
 
     // ── The edge-AI /v1 space in the LOCAL-DEV Postgres seed (issue #4, TODO 1) ──
@@ -1906,10 +1904,12 @@ class GatewayRouteAccessServiceTest {
         // side effect of "every privileged row gained it".
         var pki = new GatewayRouteAccessService(null, null, CanonicalSeed.PKI, true, false, null);
         pki.primeForTest(CanonicalSeed.forGateway(CanonicalSeed.PKI));
+        // pki bakes no /** headscale row any more (decision 79 = B moved headscale's
+        // floor to SecurityConfig's Host gate), so /key is NO_RULE on the pki seed
+        // and can never be an mfa_required surface there; none of pki's remaining
+        // rows is in the declared set either.
         assertThat(pki.isMfaRequiredSurface("/key", "default"))
-            .as("pki's /** headscale catch-all is NOT in the declared set (its cluster "
-              + "seed counterpart is mfa_required=false too — the pattern is not under "
-              + "/bff/admin or /bff/superadmin)")
+            .as("no pki row is in the declared set, and /key matches none of them")
             .isFalse();
 
         var be = new GatewayRouteAccessService(null, null, CanonicalSeed.BE, true, false, null);
@@ -1918,6 +1918,101 @@ class GatewayRouteAccessServiceTest {
             .as("be's /bff/image-builds/arch/** is SUPERADMIN-only but NOT in the "
               + "declared set (not under /bff/admin or /bff/superadmin)")
             .isFalse();
+    }
+
+    // ── DECISION 80a = B — all three wiki rows on the fe baked floor ────────────
+    // hugmesh-generator#329, operator answer 2026-09-23 (against the "add only the
+    // superadmin row" recommendation). Mirrors generator
+    // specs/cluster/manifests/route-access/initdb/20-schema.sql:1068-1070.
+
+    /** An fe gateway with BOTH datastores unreachable (no Cassandra template, no
+     *  Postgres repository): init() seeds CanonicalSeed.fe() and nothing ever
+     *  supersedes it — the exact startup-window / dead-datastore state 80a is about. */
+    private static GatewayRouteAccessService feSeedOnly(boolean mfaEnabled) {
+        var s = new GatewayRouteAccessService(null, null, CanonicalSeed.FE, true, mfaEnabled, null);
+        s.init();
+        return s;
+    }
+
+    @Test
+    void canonicalSeed_feWikiFloor_roleUserWithoutWiki_isRefusedOnTheWikiBff() {
+        var s = feSeedOnly(false);
+        // RED on origin/main 22663fe: fe() had no wiki row, so this was NO_RULE (forward).
+        assertThat(s.decide("/bff/wiki/x", "default", List.of("u1"), List.of("ROLE_USER")))
+            .as("/bff/wiki/** is ROLE_WIKI on the baked floor; ROLE_USER alone is refused")
+            .isEqualTo(Decision.DENY);
+        assertThat(s.decide("/bff/wiki/pages/home", "default", List.of("u1"), List.of("ROLE_USER", "ROLE_WIKI")))
+            .as("the wiki-access capability reaches the wiki floor")
+            .isEqualTo(Decision.ALLOW);
+    }
+
+    @Test
+    void canonicalSeed_feWikiAdminFloor_isAdminOnly() {
+        var s = feSeedOnly(false);
+        // RED on origin/main 22663fe: NO_RULE.
+        assertThat(s.decide("/bff/wiki/admin/config", "default", List.of("u1"), List.of("ROLE_USER", "ROLE_WIKI")))
+            .as("/bff/wiki/admin/** is ROLE_ADMIN; the wiki floor must not widen onto it")
+            .isEqualTo(Decision.DENY);
+        assertThat(s.decide("/bff/wiki/admin/config", "default", List.of("u1"), List.of("ROLE_ADMIN")))
+            .isEqualTo(Decision.ALLOW);
+    }
+
+    @Test
+    void canonicalSeed_feWikiSuperadminFloor_plainAdminIsRefused() {
+        var s = feSeedOnly(false);
+        // RED on origin/main 22663fe: NO_RULE.
+        assertThat(s.decide("/bff/wiki/superadmin/x", "default", List.of("u1"), List.of("ROLE_ADMIN")))
+            .as("/bff/wiki/superadmin/** is ROLE_SUPERADMIN; a plain ADMIN is refused by decide()")
+            .isEqualTo(Decision.DENY);
+        assertThat(s.decide("/bff/wiki/superadmin/x", "default", List.of("u1"), List.of("ROLE_USER", "ROLE_WIKI")))
+            .isEqualTo(Decision.DENY);
+        assertThat(s.decide("/bff/wiki/superadmin/x", "default", List.of("u1"), List.of("ROLE_SUPERADMIN")))
+            .isEqualTo(Decision.ALLOW);
+    }
+
+    @Test
+    void canonicalSeed_feWikiRows_mirrorTheClusterSeedRoleStrings() {
+        // Byte-level pin of the three rows (pattern, role, allow) so a role-string
+        // typo on either side is caught here rather than on a live mesh.
+        var wiki = CanonicalSeed.forGateway(CanonicalSeed.FE).stream()
+                .filter(r -> r.urlPattern().startsWith("/bff/wiki"))
+                .map(r -> r.urlPattern() + "|" + r.role() + "|" + r.allow())
+                .sorted().toList();
+        assertThat(wiki).containsExactly(
+                "/bff/wiki/**|ROLE_WIKI|true",
+                "/bff/wiki/admin/**|ROLE_ADMIN|true",
+                "/bff/wiki/superadmin/**|ROLE_SUPERADMIN|true");
+    }
+
+    // ── DECISION 80b = B — per-service admin + superadmin rows carry MFA ────────
+    // hugmesh-generator#329, operator answer 2026-09-23. The two wiki console rows
+    // join MFA_REQUIRED_FALLBACK_ROWS; the /bff/wiki/** floor stays false.
+
+    @Test
+    void canonicalSeed_feWikiConsoleRows_raiseMfaRequiredOnGrant() {
+        var s = feSeedOnly(true);
+        String mfa = net.hugmesh.gateway.security.Roles.MFA_SATISFIED;
+        // RED on origin/main 22663fe: NO_RULE for every line below.
+        assertThat(s.decide("/bff/wiki/admin/config", "default", List.of("u1"), List.of("ROLE_ADMIN")))
+            .as("the wiki admin-console grant demands a fresh second factor")
+            .isEqualTo(Decision.DENY);
+        assertThat(s.decide("/bff/wiki/admin/config", "default", List.of("u1"), List.of("ROLE_ADMIN", mfa)))
+            .isEqualTo(Decision.ALLOW);
+        assertThat(s.decide("/bff/wiki/superadmin/x", "default", List.of("u1"), List.of("ROLE_SUPERADMIN")))
+            .as("the wiki superadmin-console grant demands a fresh second factor")
+            .isEqualTo(Decision.DENY);
+        assertThat(s.decide("/bff/wiki/superadmin/x", "default", List.of("u1"), List.of("ROLE_SUPERADMIN", mfa)))
+            .isEqualTo(Decision.ALLOW);
+        // The wiki-access floor is NOT an MFA surface.
+        assertThat(s.decide("/bff/wiki/pages/home", "default", List.of("u1"), List.of("ROLE_USER", "ROLE_WIKI")))
+            .as("/bff/wiki/** stays mfa_required=false")
+            .isEqualTo(Decision.ALLOW);
+
+        // The privileged-floor view GatewayRouteAccessFilter consults for the
+        // ADMIN/SUPERADMIN bypasses (which never reach decide()).
+        assertThat(s.isMfaRequiredSurface("/bff/wiki/admin/config", "default")).isTrue();
+        assertThat(s.isMfaRequiredSurface("/bff/wiki/superadmin/x", "default")).isTrue();
+        assertThat(s.isMfaRequiredSurface("/bff/wiki/pages/home", "default")).isFalse();
     }
 
     @Test

@@ -35,18 +35,16 @@ INSERT INTO gateway_route_access (gateway, url_pattern, role, allow) VALUES
   ('hugmesh-pki-gateway',  '/api/auth/**',          'ROLE_USER',  true),
   ('hugmesh-pki-gateway',  '/login/**',             'PUBLIC',     true),
   ('hugmesh-pki-gateway',  '/.well-known/**',       'PUBLIC',     true),
-  -- SUPERADMIN floor for the headscale control plane (bug #15). The pki gateway
-  -- also fronts the cross-domain headscale control plane on its own Host
-  -- (application-pki.yml: the `headscale` route matches Host=scale.hugmesh.net
-  -- with NO Path predicate, so its paths are NOT covered by the three rows above).
-  -- Without a row those paths were NO_RULE and any authenticated same-domain
-  -- ROLE_USER reached the superadmin-tier control plane. The /** catch-all is the
-  -- correct anchor; longest-pattern-match keeps the three rows above intact for
-  -- their own paths while everything else (headscale) floors to SUPERADMIN. MUST be
-  -- ROLE_SUPERADMIN, NOT ROLE_ADMIN — only SUPERADMIN crosses domains to the infra
-  -- control plane. Mirrors the canonical CanonicalSeed.pki() fallback + the
-  -- be-gateway `/bff/superadmin/** -> ROLE_SUPERADMIN` precedent.
-  ('hugmesh-pki-gateway',  '/**',                   'ROLE_SUPERADMIN', true),
+  -- NO bare '/**' row for the pki gateway (decision 79 = B,
+  -- hugmesh-admin-bff-api#57, 2026-09-23). The headscale control plane (the
+  -- `headscale` route in hugmesh-pki-gateway application-pki.yml, Host=scale.<domain>
+  -- with NO Path predicate) used to be floored here by a '/**' -> ROLE_SUPERADMIN
+  -- row (bug #15). It could not stop a same-brand ROLE_ADMIN / ROLE_GAME-MASTER
+  -- (GatewayRouteAccessFilter forwards both in their own domain before any row is
+  -- read), and the admin API can never recreate a '/**' row. The gateway's
+  -- SecurityConfig now requires ROLE_SUPERADMIN for EVERY request on that route's
+  -- Host, ahead of PUBLIC_PATHS, so no row is needed here. Mirrors
+  -- CanonicalSeed.pki().
   -- be-gateway (matrix/mastodon/api.hugmesh.net)
   -- Homeserver surfaces are gated by the PLATFORM roles (account-states
   -- ban/congruence), NOT the broad ROLE_USER floor: a ban removes ROLE_MATRIX /
@@ -203,6 +201,16 @@ INSERT INTO gateway_route_access (gateway, url_pattern, role, allow) VALUES
   -- when Postgres loads. No games-services DENY refinement here, same as the
   -- baked copy (decision 41 authorises exactly this one row).
   ('hugmesh-fe-gateway',   '/bff/superadmin/**',    'ROLE_SUPERADMIN', true),
+  -- Wiki BFF (/bff/wiki/** -> hugmesh-wiki-bff-api), all three rows (decision
+  -- 80a = B, hugmesh-generator#329, 2026-09-23). Mirrors the cluster seed
+  -- (route-access/initdb/20-schema.sql) + the baked CanonicalSeed.fe() rows role
+  -- for role: the superadmin + admin console seams win the longest match over the
+  -- ROLE_WIKI access floor. Do NOT pair ROLE_WIKI on the admin row or ROLE_ADMIN on
+  -- the floor. (This file has no mfa_required column; the cluster seed carries the
+  -- decision-80b flag for the two console rows.)
+  ('hugmesh-fe-gateway',   '/bff/wiki/superadmin/**', 'ROLE_SUPERADMIN', true),
+  ('hugmesh-fe-gateway',   '/bff/wiki/admin/**',      'ROLE_ADMIN',      true),
+  ('hugmesh-fe-gateway',   '/bff/wiki/**',            'ROLE_WIKI',       true),
   -- Character Forge (OPTIONAL slug `character-forge`): the 3D character-maker
   -- remote UI shell + its BFF. Plain ROLE_USER capability floor
   -- (character-studio precedent); do NOT pair ROLE_ADMIN on a capability floor
