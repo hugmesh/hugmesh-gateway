@@ -1484,6 +1484,47 @@ class GatewayRouteAccessFilterTest {
             assertThat(downstreamCalled).as("registered by the runtime file").isTrue();
         }
 
+        /** A registry whose answer for ONION_Y flips to "unregistered" (null) after
+         *  the first lookup — a host-map reload landing mid-request — and that
+         *  counts lookups. */
+        private net.hugmesh.gateway.security.DomainRegistry flipAfterFirstLookup(
+                java.util.concurrent.atomic.AtomicInteger lookups) {
+            return new net.hugmesh.gateway.security.DomainRegistry(
+                    BRANDX_ISSUER, BRANDX_ISSUER + "=brandx," + BRANDY_ISSUER + "=brandy",
+                    "api.brandx.tld=brandx," + ONION_Y + "=brandy") {
+                @Override
+                public String domainForHost(String host) {
+                    return lookups.incrementAndGet() == 1 ? super.domainForHost(host) : null;
+                }
+            };
+        }
+
+        @Test
+        void oneRegistryLookupPerRequest_aReloadMidRequestCannotSplitTheDecision() {
+            // The gate, the domain match and the route-access grant must all see the
+            // SAME answer: resolving the Host twice would let a reload between the two
+            // lookups admit a request past the onion gate and then decide it as a
+            // different brand.
+            var lookups = new java.util.concurrent.atomic.AtomicInteger();
+            var cap = domainCaptor();
+            filter = new GatewayRouteAccessFilter(routeAccess, flipAfterFirstLookup(lookups));
+            Jwt userY = jwt("user-y", List.of(Map.of("name", "user")), BRANDY_ISSUER);
+            run("/api/social/feed", ONION_Y, authForDomain(userY, "brandy"));
+            assertThat(lookups.get()).as("Host resolved exactly once").isEqualTo(1);
+            assertThat(downstreamCalled).isTrue();
+            assertThat(cap.getValue()).isEqualTo("brandy");
+        }
+
+        @Test
+        void oneRegistryLookupPerRequest_theXDomainStampReusesIt() {
+            var lookups = new java.util.concurrent.atomic.AtomicInteger();
+            var f = new GatewayRouteAccessFilter(routeAccess, flipAfterFirstLookup(lookups),
+                    false, 600_000L, true);
+            var fwd = runCapturingForwarded(f, "/api/games/catalog", ONION_Y, null, null);
+            assertThat(lookups.get()).as("stamp and gate share one lookup").isEqualTo(1);
+            assertThat(fwd.getRequest().getHeaders().get("X-Domain")).containsExactly("brandy");
+        }
+
         @Test
         void stampOn_mappedOnion_forwardsItsBrand_unmappedOnionForwardsNothing() {
             var f = new GatewayRouteAccessFilter(routeAccess, onionRegistry(), false, 600_000L, true);
