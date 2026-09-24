@@ -418,7 +418,8 @@ unscoped/`default`-owned key remains writable single-tenant (back-compat).
   to the cluster CA and validates the backend cert on the **proxy leg only**.
   Enabled with `HUGMESH_GATEWAY_MTLS_ENABLED=true`; store passwords bind from
   `hugmesh.tls.*` (written by the chart's keystore initContainer into the in-pod
-  `/stores/application.properties`, never in git).
+  `/stores/application.properties`, never in git). A store that will not open stops
+  startup with an error naming the store and its password key (see *Known Gaps*).
 - **PKI cert-chain builder** — this repo is the canonical home of the platform
   cert-chain builder: [`scripts/pki/build-chained-cert.sh`](scripts/pki/build-chained-cert.sh)
   mints leaf/intermediate certs off a shared root (one root, two intermediates,
@@ -588,10 +589,20 @@ forward-looking, not-yet-started work in *Roadmap* below):
   the packaged `${HUGMESH_TLS_KEY_STORE_PASSWORD:}` (empty) and `KeyStore.load(...)`
   could not open the real PKCS12 store. Fixed chart-side in hugmesh-generator
   `39f9fce4` (2026-07-17; the same emitted-file block is in all nine BFF/API
-  manifests), re-verified against the chart 2026-09-09. What remains unproven is a real
-  in-cluster pod boot with the flag on. `DownstreamMtlsConfig.load` fails fast and
-  never falls back to plaintext, so a wrong store or password is a crash-loop, not a
-  silent downgrade.
+  manifests), re-verified against the chart 2026-09-09 and again 2026-09-24 (every
+  gateway Application that sets the flag — be, fe, superadmin — also sets
+  `keystore.enabled: true`, which is what adds `file:/stores/` to the additional
+  location). The Spring half of that hand-off is now *executed* rather than read:
+  `DownstreamMtlsStoresFileLoadingTest` runs this repo's Boot version and packaged
+  `application.yml` and shows the plain file loading under `routes` alone (overriding
+  the empty fallback) while the old profile-named file stays unloaded. What remains
+  unproven is a real in-cluster pod boot with the flag on. The backstop is under test
+  too (`DownstreamMtlsConfigTest`): store loading fails fast and never falls back to
+  plaintext, and the startup error names the store, the exact `hugmesh.tls.*-password`
+  key, and — when that key is empty, the #1 signature the JDK alone reports as an
+  indistinguishable "keystore password was incorrect" — the unloaded
+  `/stores/application.properties` as the usual cause. An empty password is not refused
+  up front, because a passwordless PKCS12 is a supported shape (also tested).
 
 ## Roadmap
 
