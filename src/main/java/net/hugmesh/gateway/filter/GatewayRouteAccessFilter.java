@@ -225,8 +225,25 @@ public class GatewayRouteAccessFilter implements WebFilter, Ordered {
         // same trust posture ExternalAuthHeaderFilter holds for the External-* trio,
         // established BEFORE any consumer exists so the forwarding half can never
         // land on a spoofable header.
-        final ServerWebExchange exchange = normalizeDomainHeader(inbound);
+        // Target brand for this request (Host -> registry; "default" on
+        // single-tenant). Computed ONCE, here, and threaded into the X-Domain stamp
+        // and every decision below, so a host-map reload between two lookups can
+        // never make the stamp, the gate and the grant layer disagree about which
+        // brand this is. (The Host header is not touched by the X-Domain strip.)
+        final String requestDomain = targetDomain(inbound);
+        final ServerWebExchange exchange = normalizeDomainHeader(inbound, requestDomain);
         String path = exchange.getRequest().getPath().value();
+        if (requestDomain == null) {
+            // UNREGISTERED ONION (hugmesh-gateway#38). The registry answers null
+            // only for a `.onion` Host no entry maps while a host map / multi-brand
+            // registry is configured. Fail CLOSED for EVERY caller — anonymous,
+            // superadmin included — BEFORE the anonymous fast-path and both
+            // bypasses: there is no brand to serve, and collapsing to "default"
+            // would serve brand A's surface over brand B's onion. This is not a
+            // cross-brand question the superadmin bypass answers; the target brand
+            // is simply unknown.
+            return rejectUnregisteredOnion(exchange, path);
+        }
         // Wrap the principal in Optional + defaultIfEmpty so the stream emits
         // exactly one element: a present auth, or an explicit "absent". A bare
         // flatMap(...).switchIfEmpty(chain.filter(...)) is WRONG here — the
@@ -245,10 +262,11 @@ public class GatewayRouteAccessFilter implements WebFilter, Ordered {
                 }
                 AbstractAuthenticationToken auth = maybeAuth.get();
                 // Target brand for this request (Host -> registry suffix; "default"
-                // on single-tenant). Computed once and threaded both into the
-                // cross-domain hard-deny below AND the route-access fall-through, so
-                // the GRANT layer can no longer re-grant a foreign-brand principal.
-                String targetDomain = targetDomain(exchange);
+                // on single-tenant). Computed once (above, non-null past the onion
+                // gate) and threaded both into the cross-domain hard-deny below AND
+                // the route-access fall-through, so the GRANT layer can no longer
+                // re-grant a foreign-brand principal.
+                String targetDomain = requestDomain;
                 if (auth.getPrincipal() instanceof Jwt jwt) {
                     // ── D8 PRIVILEGED MFA FLOOR (HARD, PRE-BYPASS) ────────────────
                     // This MUST sit ABOVE the SUPERADMIN and ADMIN/GAME-MASTER
@@ -483,7 +501,7 @@ public class GatewayRouteAccessFilter implements WebFilter, Ordered {
      * UNCHANGED, so the overwhelmingly common request allocates no mutated exchange
      * and the filter is byte-identical to its pre-flag behaviour.
      */
-    private ServerWebExchange normalizeDomainHeader(ServerWebExchange exchange) {
+    private ServerWebExchange normalizeDomainHeader(ServerWebExchange exchange, String requestDomain) {
         // get(), not getFirst(): presence is the question, not the value. getFirst
         // answers null for BOTH "absent" and "present with an empty value list", so
         // it would leave that second case forwarded; get() only answers null when
@@ -494,7 +512,8 @@ public class GatewayRouteAccessFilter implements WebFilter, Ordered {
         // The SAME derivation the route-access decision uses below, so a downstream
         // scoping on this header and this gateway gating on the table can never
         // disagree about which brand the request is for.
-        final String stamped = forwardDomainHeader ? targetDomain(exchange) : null;
+        // (null for an unregistered onion, which filter() rejects before forwarding.)
+        final String stamped = forwardDomainHeader ? requestDomain : null;
         return exchange.mutate()
                 .request(b -> b.headers(h -> {
                     h.remove(X_DOMAIN);
@@ -548,8 +567,11 @@ public class GatewayRouteAccessFilter implements WebFilter, Ordered {
     /**
      * Target brand for this request, from the {@code Host} header (falling back
      * to the request URI host) mapped through the registry's host-suffix table.
-     * Returns {@code "default"} when single-issuer OR the host is unmapped, so
-     * single-tenant clusters always match. The Host check is defense-in-depth:
+     * Returns {@code "default"} when single-issuer OR an ordinary host is unmapped,
+     * so single-tenant clusters always match. Returns {@code null} — and the
+     * caller REJECTS — for an unmapped {@code .onion} Host on a gateway with a host
+     * map or a multi-brand registry ({@link DomainRegistry#domainForHost}); that
+     * null is deliberately NOT coalesced to {@code "default"} (hugmesh-gateway#38). The Host check is defense-in-depth:
      * per-brand gateway INSTANCES (each serving only its own Host + selecting only
      * its own rows {@code WHERE gateway=:gw}) are the primary isolation; this
      * denies a token minted for brand-Y presented to brand-X's gateway even if
@@ -567,8 +589,7 @@ public class GatewayRouteAccessFilter implements WebFilter, Ordered {
             int c = host.indexOf(':');
             if (c >= 0) host = host.substring(0, c);   // strip port
         }
-        String d = domainRegistry.domainForHost(host);
-        return d == null ? DomainRegistry.DEFAULT_DOMAIN : d;
+        return domainRegistry.domainForHost(host);
     }
 
     /** Single-tenant ({@code "default"}) matches everything (back-compat).
@@ -585,6 +606,18 @@ public class GatewayRouteAccessFilter implements WebFilter, Ordered {
 
     private Mono<Void> reject(ServerWebExchange exchange, String path) {
         log.warn("[route-access] denied — gateway={} path={}", routeAccess.gatewayName(), path);
+        exchange.getResponse().setStatusCode(HttpStatus.FORBIDDEN);
+        exchange.getResponse().getHeaders().add("X-Route-Denied",
+                routeAccess.gatewayName() + ":" + path);
+        return exchange.getResponse().setComplete();
+    }
+
+    /** 403 for an unregistered onion Host — same shape as {@link #reject} (route-access
+     *  default-deny, {@code X-Route-Denied}) so a client cannot tell an unknown onion
+     *  from an ungranted route, with a distinct log line for the operator. */
+    private Mono<Void> rejectUnregisteredOnion(ServerWebExchange exchange, String path) {
+        log.warn("[route-access] denied — unregistered .onion Host (no tenancy host-map entry), "
+                + "gateway={} path={}", routeAccess.gatewayName(), path);
         exchange.getResponse().setStatusCode(HttpStatus.FORBIDDEN);
         exchange.getResponse().getHeaders().add("X-Route-Denied",
                 routeAccess.gatewayName() + ":" + path);

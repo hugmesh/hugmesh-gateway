@@ -304,6 +304,25 @@ never a user-settable claim.
   single-issuer cluster emits `DOMAIN_default` for every token and **nothing else
   changes** (back-compat). When populated, only listed issuers are trusted; an
   unknown `iss` **fails closed** (401) before any authority is emitted.
+- **Onion hosts** (hugmesh-gateway#38). A Tor v3 onion name is minted on the node
+  at first boot, so it cannot be a literal in `app.tenancy.hosts`.
+  `app.tenancy.hosts-file` (`APP_TENANCY_HOSTS_FILE`) names a runtime file — a
+  plain file or a mounted ConfigMap key — of `<hash>.onion=<domain>` lines
+  (`#` comments, blank lines and CSV runs allowed) that the node's Tor reconcile or
+  admin-bff appends after a mint. The registry re-reads it every
+  `app.tenancy.hosts-file-refresh-ms` (default 5 s, content-compared, swapped
+  atomically); a missing file means no runtime entries, an unreadable one keeps the
+  last-known-good map. Only `.onion` keys are accepted from the file and a file line
+  never overrides a host set in `app.tenancy.hosts`. Once any host map is
+  configured (literal **or** file) or the registry is multi-issuer, an **unmapped
+  `.onion` Host is denied 403** (`X-Route-Denied`) for every caller — anonymous and
+  superadmin included — instead of collapsing to `default`, so an unregistered onion
+  can never serve another brand. With no host map and a single issuer there is one
+  brand and an onion stays `default`. The mapping is routing, not isolation: Tor
+  forwards whatever `Host` the client sends, so a client can still name another
+  brand's HTTPS host over any onion; per-brand isolation remains the issuer-derived
+  domain check below. Writing the file is not done here — the node/compose half is
+  tracked on hugmesh/hugmesh-generator#582.
 - **`TenancyResourceServerConfig`** is **config-gated and opt-in**: it contributes
   a per-issuer `ReactiveAuthenticationManagerResolver` only when
   `app.tenancy.issuers` genuinely carries `issuer=domain` pairs (a
@@ -404,6 +423,8 @@ unscoped/`default`-owned key remains writable single-tenant (back-compat).
 | `API_DOWNSTREAM_URI` | default `/api/**` backend |
 | `APP_TENANCY_ISSUERS` | CSV `issuerUri=domain,…` (opt-in multi-brand; empty ⇒ single-tenant) |
 | `APP_TENANCY_HOSTS` | CSV `hostSuffix=domain,…` (defense-in-depth Host→domain map) |
+| `APP_TENANCY_HOSTS_FILE` | path to a runtime `<hash>.onion=domain` host-map file (re-read on change; see *Onion hosts*) |
+| `APP_TENANCY_HOSTS_FILE_REFRESH_MS` | re-read interval for that file (default `5000`) |
 | `HUGMESH_GATEWAY_MTLS_ENABLED` + `HUGMESH_TLS_*` | downstream mTLS leg |
 | `HUGMESH_GATEWAY_BFF_EXCHANGE_ENABLED` | enable the dark `bff_`→custody-JWT exchange filter (default off) |
 | `APP_BFF_SESSION_ENABLED` / `BFF_BASE_URL` | the `bff_`/cookie introspection filter (default **on**, PR #70) + its admin-bff base URL; set the former to `false` to dark-disable |

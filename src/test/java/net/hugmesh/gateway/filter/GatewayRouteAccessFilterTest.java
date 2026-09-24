@@ -1355,6 +1355,145 @@ class GatewayRouteAccessFilterTest {
         }
     }
 
+    // ── ONION HOSTS — hugmesh-gateway#38 ─────────────────────────────────────
+    // A mapped onion Host resolves to its brand like any HTTPS host; an UNMAPPED
+    // onion on a host-mapped / multi-brand gateway is refused for EVERY caller,
+    // never served as "default".
+    @org.junit.jupiter.api.Nested
+    class OnionHosts {
+
+        static final String ONION_X = "a".repeat(52) + "bxid.onion";
+        static final String ONION_Y = "b".repeat(52) + "byid.onion";
+        static final String ONION_Z = "c".repeat(52) + "czid.onion";
+
+        private net.hugmesh.gateway.security.DomainRegistry onionRegistry() {
+            return new net.hugmesh.gateway.security.DomainRegistry(
+                    BRANDX_ISSUER,
+                    BRANDX_ISSUER + "=brandx," + BRANDY_ISSUER + "=brandy",
+                    "api.brandx.tld=brandx,api.brandy.tld=brandy,"
+                            + ONION_X + "=brandx," + ONION_Y + "=brandy");
+        }
+
+        private org.mockito.ArgumentCaptor<String> domainCaptor() {
+            org.mockito.ArgumentCaptor<String> cap = org.mockito.ArgumentCaptor.forClass(String.class);
+            when(routeAccess.decide(any(), cap.capture(), any(), any())).thenReturn(Decision.NO_RULE);
+            return cap;
+        }
+
+        @Test
+        void brandYPrincipal_overItsOwnMappedOnion_passesDomainMatch_andIsDecidedAsBrandY() {
+            var cap = domainCaptor();
+            filter = new GatewayRouteAccessFilter(routeAccess, onionRegistry());
+            Jwt userY = jwt("user-y", List.of(Map.of("name", "user")), BRANDY_ISSUER);
+            MockServerWebExchange mwex = run("/api/social/feed", ONION_Y, authForDomain(userY, "brandy"));
+            assertThat(downstreamCalled).as("brand-Y user over brand-Y's onion forwards").isTrue();
+            assertThat(mwex.getResponse().getStatusCode()).isNotEqualTo(HttpStatus.FORBIDDEN);
+            assertThat(cap.getValue()).as("route-access decided for the onion's brand").isEqualTo("brandy");
+        }
+
+        @Test
+        void brandYAdmin_overItsOwnMappedOnion_takesTheOwnDomainBypass() {
+            filter = new GatewayRouteAccessFilter(routeAccess, onionRegistry());
+            Jwt adminY = jwt("admin-y", List.of(Map.of("name", "admin")), BRANDY_ISSUER);
+            run("/api/admin/x", ONION_Y + ":80", authForDomain(adminY, "brandy", "ADMIN"));
+            assertThat(downstreamCalled).isTrue();
+        }
+
+        @Test
+        void brandXPrincipal_overBrandYsOnion_isHardDenied() {
+            filter = new GatewayRouteAccessFilter(routeAccess, onionRegistry());
+            Jwt adminX = jwt("admin-x", List.of(Map.of("name", "admin")), BRANDX_ISSUER);
+            MockServerWebExchange mwex = run("/api/admin/x", ONION_Y, authForDomain(adminX, "brandx", "ADMIN"));
+            assertThat(downstreamCalled).isFalse();
+            assertThat(mwex.getResponse().getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
+        }
+
+        @Test
+        void unmappedOnion_anonymous_isDenied_403_notServedAsDefault() {
+            filter = new GatewayRouteAccessFilter(routeAccess, onionRegistry());
+            MockServerWebExchange mwex = run("/", ONION_Z, null);
+            assertThat(downstreamCalled).as("an unregistered onion must not serve any brand").isFalse();
+            assertThat(mwex.getResponse().getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
+            assertThat(mwex.getResponse().getHeaders().getFirst("X-Route-Denied"))
+                    .isEqualTo("hugmesh-be-gateway:/");
+        }
+
+        @Test
+        void unmappedOnion_superadmin_isDenied_theBrandIsUnknownNotForeign() {
+            filter = new GatewayRouteAccessFilter(routeAccess, onionRegistry());
+            Jwt sa = jwt("sa-1", List.of(Map.of("name", "superadmin")), BRANDX_ISSUER);
+            MockServerWebExchange mwex = run("/api/admin/x", ONION_Z, authForDomain(sa, "brandx", "SUPERADMIN"));
+            assertThat(downstreamCalled).isFalse();
+            assertThat(mwex.getResponse().getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
+        }
+
+        @Test
+        void unmappedOnion_defaultDomainAdmin_isDenied_andRouteAccessNeverConsulted() {
+            // The exact pre-fix leak: the onion collapsed to "default", and a
+            // default-brand principal matched default==default and took the bypass.
+            filter = new GatewayRouteAccessFilter(routeAccess, new net.hugmesh.gateway.security.DomainRegistry(
+                    SINGLE_ISSUER, "", "hugmesh.net=default"));
+            Jwt admin = jwt("admin-1", List.of(Map.of("name", "admin")));
+            MockServerWebExchange mwex = run("/api/admin/x", ONION_Z + ".", authFor(admin, "ADMIN"));
+            assertThat(downstreamCalled).isFalse();
+            assertThat(mwex.getResponse().getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
+            Mockito.verify(routeAccess, Mockito.never()).decide(any(), any(), any(), any());
+        }
+
+        @Test
+        void unmappedOnion_bffSessionPrincipal_isDenied() {
+            filter = new GatewayRouteAccessFilter(routeAccess, onionRegistry());
+            MockServerWebExchange mwex = run("/api/social/feed", ONION_Z, bffSessionWithDomain("casdoor:u", "brandx"));
+            assertThat(downstreamCalled).isFalse();
+            assertThat(mwex.getResponse().getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
+        }
+
+        @Test
+        void singleTenant_noHostMap_onionStillForwards_theComposeLaneDoor() {
+            // setup()'s single-issuer, no-host-map registry: one brand, nothing to leak.
+            MockServerWebExchange mwex = run("/", ONION_Z, null);
+            assertThat(downstreamCalled).isTrue();
+            assertThat(mwex.getResponse().getStatusCode()).isNotEqualTo(HttpStatus.FORBIDDEN);
+        }
+
+        @Test
+        void unmappedOrdinaryHost_onAHostMappedGateway_anonymousStillForwards() {
+            // Only the onion branch fails closed; the HTTPS host contract is unchanged.
+            filter = new GatewayRouteAccessFilter(routeAccess, onionRegistry());
+            run("/", "unknown.host.tld", null);
+            assertThat(downstreamCalled).isTrue();
+        }
+
+        @Test
+        void fileRegisteredOnion_isRefusedBeforeTheMint_andServedAfterTheReload(
+                @org.junit.jupiter.api.io.TempDir java.nio.file.Path tmp) throws Exception {
+            var map = tmp.resolve("tenancy-hosts");
+            var reg = new net.hugmesh.gateway.security.DomainRegistry(BRANDX_ISSUER,
+                    BRANDX_ISSUER + "=brandx," + BRANDY_ISSUER + "=brandy", "", map.toString());
+            filter = new GatewayRouteAccessFilter(routeAccess, reg);
+            when(routeAccess.decide(any(), any(), any(), any())).thenReturn(Decision.NO_RULE);
+            Jwt userY = jwt("user-y", List.of(Map.of("name", "user")), BRANDY_ISSUER);
+
+            MockServerWebExchange before = run("/api/social/feed", ONION_Y, authForDomain(userY, "brandy"));
+            assertThat(downstreamCalled).as("not yet registered").isFalse();
+            assertThat(before.getResponse().getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
+
+            java.nio.file.Files.writeString(map, ONION_Y + "=brandy\n");
+            reg.reloadHostsFile();
+            run("/api/social/feed", ONION_Y, authForDomain(userY, "brandy"));
+            assertThat(downstreamCalled).as("registered by the runtime file").isTrue();
+        }
+
+        @Test
+        void stampOn_mappedOnion_forwardsItsBrand_unmappedOnionForwardsNothing() {
+            var f = new GatewayRouteAccessFilter(routeAccess, onionRegistry(), false, 600_000L, true);
+            var fwd = runCapturingForwarded(f, "/api/games/catalog", ONION_Y, "brandx", null);
+            assertThat(fwd.getRequest().getHeaders().get("X-Domain")).containsExactly("brandy");
+            assertThat(runCapturingForwarded(f, "/api/games/catalog", ONION_Z, "brandx", null))
+                    .as("an unregistered onion never reaches the downstream at all").isNull();
+        }
+    }
+
     /** Populates getPrincipal() on a MockServerWebExchange (the mock leaves it
      *  an empty Mono otherwise). Mirrors the helper in ResourceAccessFilterTest. */
     static class ExchangeWithPrincipal extends org.springframework.web.server.ServerWebExchangeDecorator {
