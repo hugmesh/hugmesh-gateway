@@ -281,6 +281,47 @@ class PkiHeadscaleControlPlaneAuthzSpringBootTest {
             .expectHeader().doesNotExist("X-Route-Denied");
     }
 
+    @Test
+    void idHost_roleUser_onPathsNoPkiRowGoverns_isForwarded_theDroppedFloorIsNoRule() {
+        // PINS THE WIDENING decision 79 = B chose. Dropping the bare pki '/**'
+        // ROLE_SUPERADMIN row means a path no pki row matches is NO_RULE again on every
+        // NON-headscale Host, so the authenticated() floor is the only gate and ANY
+        // signed-in principal is forwarded (as before bug #15). That reaches every such
+        // path the pki gateway serves, url_registry routes included, not only these two.
+        // RED on origin/main 7aabd34 by construction: the '/**' row answered DENY, so
+        // both requests were 403 + X-Route-Denied.
+        for (String path : List.of("/api/signup", HEADSCALE_KEY)) {
+            get(ID_HOST, path, bearer(BRAND_X, "ordinary-user", List.of("user")))
+                .expectStatus().isOk()
+                .expectHeader().doesNotExist("X-Route-Denied");
+        }
+    }
+
+    @Test
+    void idHost_anonymous_onANoRulePath_isStill401_theAuthenticatedFloorHolds() {
+        // The widening above is to AUTHENTICATED principals only: off PUBLIC_PATHS the
+        // SecurityConfig authenticated() floor still refuses anonymous traffic.
+        get(ID_HOST, "/api/signup", null)
+            .expectStatus().isUnauthorized();
+    }
+
+    @Test
+    void headscaleUriHost_withARewrittenHostHeader_isStillGated() {
+        // The URI-host branch of the matcher. With a forwarded-headers strategy the
+        // server derives the request URI host from X-Forwarded-Host, so a relayed
+        // request can carry Host = some internal name while its URI host is the
+        // headscale Host. Here the Host header is brand-X's id Host (same tenant, so the
+        // filter's own-domain admin bypass would forward it) and the URI host is the
+        // headscale Host: only the URI-host check can refuse it. Without that branch:
+        // 200 via the bypass.
+        http.get().uri("http://" + HEADSCALE_HOST + HEADSCALE_KEY)
+            .header(HttpHeaders.HOST, ID_HOST)
+            .header("Authorization", bearer(BRAND_X, "brandx-admin", List.of("admin")))
+            .exchange()
+            .expectStatus().isForbidden()
+            .expectHeader().doesNotExist("X-Route-Denied");
+    }
+
     /** Local probe controller — a FORWARDED request reaches this handler (bodiless 200).
      *  A bodiless ResponseEntity avoids the EncoderHttpMessageWriter Content-Length write
      *  on the read-only gateway response headers (see
@@ -299,6 +340,7 @@ class PkiHeadscaleControlPlaneAuthzSpringBootTest {
                 "/key",                       // headscale noise key (control plane)
                 "/machine/map",               // headscale poll/map stream (control plane)
                 "/api/auth/whoami",           // pki ROLE_USER surface (and PUBLIC_PATHS)
+                "/api/signup",                // no pki row governs it: NO_RULE since decision 79
                 "/login/index",               // pki PUBLIC surface
                 "/.well-known/probe-openid",  // pki PUBLIC surface
         })
