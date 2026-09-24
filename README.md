@@ -304,6 +304,40 @@ never a user-settable claim.
   single-issuer cluster emits `DOMAIN_default` for every token and **nothing else
   changes** (back-compat). When populated, only listed issuers are trusted; an
   unknown `iss` **fails closed** (401) before any authority is emitted.
+- **Onion hosts** (hugmesh-gateway#38). A Tor v3 onion name is minted on the node
+  at first boot, so it cannot be a literal in `app.tenancy.hosts`.
+  `app.tenancy.hosts-file` (`APP_TENANCY_HOSTS_FILE`) names a runtime file — a
+  plain file or a mounted ConfigMap key — of `<hash>.onion=<domain>` lines
+  (`#` comments, blank lines and CSV runs allowed) that the node's Tor reconcile or
+  admin-bff appends after a mint. The registry re-reads it every
+  `app.tenancy.hosts-file-refresh-ms` (default 5 s, content-compared, swapped
+  atomically); a missing file means no runtime entries, an unreadable one keeps the
+  last-known-good map. Only `.onion` keys are accepted from the file and a file line
+  never overrides a host set in `app.tenancy.hosts`. Once **onion tenancy** is
+  configured — the file path is set, or `app.tenancy.hosts` maps a named onion — an
+  **unmapped `.onion` Host is never served**: the route-access filter answers 403
+  (`X-Route-Denied`) for every caller that reaches it — anonymous on a `permitAll`
+  path, and every authenticated caller, superadmin included — instead of collapsing
+  to `default`, so an unregistered onion can never serve another brand. (Spring
+  Security runs before that filter, so an anonymous request for a protected path on
+  such a Host is answered 401 or sent to login first; either way no brand is served.) Without onion tenancy there is
+  at most one onion (the mesh's own door, the default brand's) and it resolves like
+  any unmapped host, to `default` — even when `APP_TENANCY_HOSTS`/`_ISSUERS` are set
+  for HTTPS brands (the compose `BRAND_B=1` lane and Studio's own-Casdoor domains
+  set them on `hugmesh-fe-gateway`, whose `TOR=1` onion door must keep working). The mapping is routing, not isolation: Tor
+  forwards whatever `Host` the client sends, so a client can still name another
+  brand's HTTPS host over any onion; per-brand isolation remains the issuer-derived
+  domain check below. Writing the file is not done here — the node/compose half is
+  tracked on hugmesh/hugmesh-generator#582. **Contract for that writer:** (1) once
+  `APP_TENANCY_HOSTS_FILE` is set, EVERY unmapped onion is refused — including the
+  mesh's own default-brand door — so the writer must register that onion too, as
+  `<hash>.onion=default`, not only the extra brands' onions; (2) write a temp file
+  in the same directory and `rename` it over the target (the poll reads the file
+  non-atomically, so an in-place truncate-and-rewrite can briefly drop onions, which
+  then fail closed until the next poll); (3) leave
+  `APP_TENANCY_HOSTS_FILE_REFRESH_MS` unset or give it a number — an EMPTY value (the
+  compose `${VAR:-}` idiom) resolves the schedule to `""` and the gateway fails to
+  start. `#` starts a comment anywhere on a line.
 - **`TenancyResourceServerConfig`** is **config-gated and opt-in**: it contributes
   a per-issuer `ReactiveAuthenticationManagerResolver` only when
   `app.tenancy.issuers` genuinely carries `issuer=domain` pairs (a
@@ -404,6 +438,8 @@ unscoped/`default`-owned key remains writable single-tenant (back-compat).
 | `API_DOWNSTREAM_URI` | default `/api/**` backend |
 | `APP_TENANCY_ISSUERS` | CSV `issuerUri=domain,…` (opt-in multi-brand; empty ⇒ single-tenant) |
 | `APP_TENANCY_HOSTS` | CSV `hostSuffix=domain,…` (defense-in-depth Host→domain map) |
+| `APP_TENANCY_HOSTS_FILE` | path to a runtime `<hash>.onion=domain` host-map file (re-read on change; see *Onion hosts*) |
+| `APP_TENANCY_HOSTS_FILE_REFRESH_MS` | re-read interval for that file (default `5000`) |
 | `HUGMESH_GATEWAY_MTLS_ENABLED` + `HUGMESH_TLS_*` | downstream mTLS leg |
 | `HUGMESH_GATEWAY_BFF_EXCHANGE_ENABLED` | enable the dark `bff_`→custody-JWT exchange filter (default off) |
 | `APP_BFF_SESSION_ENABLED` / `BFF_BASE_URL` | the `bff_`/cookie introspection filter (default **on**, PR #70) + its admin-bff base URL; set the former to `false` to dark-disable |

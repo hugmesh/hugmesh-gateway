@@ -67,6 +67,24 @@ app:
     # the gateway's Host-vs-DOMAIN bypass scoping. Empty => the Host check is a
     # no-op (every host resolves to "default") on single-brand clusters.
     hosts: ${APP_TENANCY_HOSTS:}
+    # OPTIONAL path to a RUNTIME host-map file (hugmesh-gateway#38): one
+    # "<hash>.onion=<slug>" per line (# comments, blank lines and CSV runs allowed),
+    # written by the node's Tor reconcile / admin-bff after it mints an onion — an
+    # onion name cannot be a config-time literal above. Only .onion keys are read
+    # from it and it never overrides a host set in `hosts`. It may be a mounted
+    # ConfigMap key. Once this path is set (or `hosts` maps a named onion) an
+    # UNMAPPED .onion Host is denied 403 instead of served as "default". Empty (and
+    # no onion in `hosts`) => an onion resolves like any unmapped host, "default"
+    # (the mesh's one onion door, even on a multi-brand BRAND_B=1 stack).
+    hosts-file: ${APP_TENANCY_HOSTS_FILE:}
+    # WRITER CONTRACT (hugmesh-generator#582): once this path is set EVERY unmapped
+    # onion is refused, the mesh's own default door included, so the writer must also
+    # register it as "<hash>.onion=default"; write temp-then-rename, never in place.
+    # How often the host-map file is re-read (content compared, swapped atomically;
+    # a missing file = no runtime entries, an unreadable one keeps the last map).
+    # Leave APP_TENANCY_HOSTS_FILE_REFRESH_MS unset or numeric: an EMPTY value makes
+    # the @Scheduled delay "" and the context fails to start.
+    hosts-file-refresh-ms: ${APP_TENANCY_HOSTS_FILE_REFRESH_MS:5000}
   # ── D8 MFA floor (gateway) — SHIPS DARK, both flags DEFAULT OFF ──────────────
   # When DISABLED (the defaults below) the gateway is byte-identical to its pre-D8
   # behaviour: the MFA_SATISFIED marker is never derived, the gateway_route_access
