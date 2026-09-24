@@ -77,8 +77,13 @@ app:
     # no onion in `hosts`) => an onion resolves like any unmapped host, "default"
     # (the mesh's one onion door, even on a multi-brand BRAND_B=1 stack).
     hosts-file: ${APP_TENANCY_HOSTS_FILE:}
+    # WRITER CONTRACT (hugmesh-generator#582): once this path is set EVERY unmapped
+    # onion is refused, the mesh's own default door included, so the writer must also
+    # register it as "<hash>.onion=default"; write temp-then-rename, never in place.
     # How often the host-map file is re-read (content compared, swapped atomically;
     # a missing file = no runtime entries, an unreadable one keeps the last map).
+    # Leave APP_TENANCY_HOSTS_FILE_REFRESH_MS unset or numeric: an EMPTY value makes
+    # the @Scheduled delay "" and the context fails to start.
     hosts-file-refresh-ms: ${APP_TENANCY_HOSTS_FILE_REFRESH_MS:5000}
   # ── D8 MFA floor (gateway) — SHIPS DARK, both flags DEFAULT OFF ──────────────
   # When DISABLED (the defaults below) the gateway is byte-identical to its pre-D8

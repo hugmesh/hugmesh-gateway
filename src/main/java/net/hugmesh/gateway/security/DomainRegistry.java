@@ -183,8 +183,14 @@ public class DomainRegistry {
         if (content != null) {
             Map<String, String> fromFile = new LinkedHashMap<>();
             for (String line : content.split("\\R")) {
-                String l = line.strip();
-                if (l.isEmpty() || l.startsWith("#")) continue;
+                // "#" starts a comment ANYWHERE on the line, not only in column 0: a
+                // commented-out CSV run ("# old: a.onion=x, b.onion=y") must not
+                // come back to life after the comma split, and a trailing note
+                // ("a.onion=brandy # minted 09-23") must not leak into the slug.
+                // No host name and no sanitized slug can contain '#'.
+                int hash = line.indexOf('#');
+                String l = (hash >= 0 ? line.substring(0, hash) : line).strip();
+                if (l.isEmpty()) continue;
                 // A line may also carry a CSV run, matching the env literal's shape.
                 for (String pair : l.split(",")) putHostPair(fromFile, pair, true);
             }

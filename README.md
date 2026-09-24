@@ -315,9 +315,12 @@ never a user-settable claim.
   last-known-good map. Only `.onion` keys are accepted from the file and a file line
   never overrides a host set in `app.tenancy.hosts`. Once **onion tenancy** is
   configured — the file path is set, or `app.tenancy.hosts` maps a named onion — an
-  **unmapped `.onion` Host is denied 403** (`X-Route-Denied`) for every caller —
-  anonymous and superadmin included — instead of collapsing to `default`, so an
-  unregistered onion can never serve another brand. Without onion tenancy there is
+  **unmapped `.onion` Host is never served**: the route-access filter answers 403
+  (`X-Route-Denied`) for every caller that reaches it — anonymous on a `permitAll`
+  path, and every authenticated caller, superadmin included — instead of collapsing
+  to `default`, so an unregistered onion can never serve another brand. (Spring
+  Security runs before that filter, so an anonymous request for a protected path on
+  such a Host is answered 401 or sent to login first; either way no brand is served.) Without onion tenancy there is
   at most one onion (the mesh's own door, the default brand's) and it resolves like
   any unmapped host, to `default` — even when `APP_TENANCY_HOSTS`/`_ISSUERS` are set
   for HTTPS brands (the compose `BRAND_B=1` lane and Studio's own-Casdoor domains
@@ -325,7 +328,16 @@ never a user-settable claim.
   forwards whatever `Host` the client sends, so a client can still name another
   brand's HTTPS host over any onion; per-brand isolation remains the issuer-derived
   domain check below. Writing the file is not done here — the node/compose half is
-  tracked on hugmesh/hugmesh-generator#582.
+  tracked on hugmesh/hugmesh-generator#582. **Contract for that writer:** (1) once
+  `APP_TENANCY_HOSTS_FILE` is set, EVERY unmapped onion is refused — including the
+  mesh's own default-brand door — so the writer must register that onion too, as
+  `<hash>.onion=default`, not only the extra brands' onions; (2) write a temp file
+  in the same directory and `rename` it over the target (the poll reads the file
+  non-atomically, so an in-place truncate-and-rewrite can briefly drop onions, which
+  then fail closed until the next poll); (3) leave
+  `APP_TENANCY_HOSTS_FILE_REFRESH_MS` unset or give it a number — an EMPTY value (the
+  compose `${VAR:-}` idiom) resolves the schedule to `""` and the gateway fails to
+  start. `#` starts a comment anywhere on a line.
 - **`TenancyResourceServerConfig`** is **config-gated and opt-in**: it contributes
   a per-issuer `ReactiveAuthenticationManagerResolver` only when
   `app.tenancy.issuers` genuinely carries `issuer=domain` pairs (a

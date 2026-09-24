@@ -333,6 +333,36 @@ class DomainRegistryTest {
         }
 
         @Test
+        void fileComments_commentedCsvRunStaysDead_andATrailingNoteNeverReachesTheSlug() throws Exception {
+            // A commented-out CSV run must not resurrect its second pair after the
+            // comma split, and an inline note must not be sanitized into the slug
+            // ("brandy # note" -> "brandy---note").
+            var f = write("hosts.map", "# old: " + ONION_X + "=brandx, " + ONION_Y + "=brandy\n"
+                    + "   #" + ONION_Z + "=brandx\n"
+                    + "www." + ONION_Z + "=brandy   # minted 09-23, " + ONION_X + "=brandx\n");
+            DomainRegistry reg = new DomainRegistry("https://id.brandx.tld", ISSUERS, "",
+                    f.toString());
+            assertThat(reg.domainForHost(ONION_X)).as("first pair of a commented CSV run").isNull();
+            assertThat(reg.domainForHost(ONION_Y)).as("second pair of a commented CSV run").isNull();
+            assertThat(reg.domainForHost(ONION_Z)).as("indented comment line").isNull();
+            assertThat(reg.domainForHost("www." + ONION_Z)).as("inline note stripped from the slug")
+                    .isEqualTo("brandy");
+        }
+
+        @Test
+        void fileRegistersTheMeshsOwnOnionAsDefault_soItsDoorSurvivesTheFileBeingSet() throws Exception {
+            // hugmesh-generator#582 contract: once APP_TENANCY_HOSTS_FILE is set EVERY
+            // unmapped onion fails closed, including the mesh's own default-brand door,
+            // so the writer must register that onion too — as "default".
+            var f = write("hosts.map", ONION_X + "=default\n" + ONION_Y + "=brandy\n");
+            DomainRegistry reg = new DomainRegistry("https://id.brandx.tld", ISSUERS, "",
+                    f.toString());
+            assertThat(reg.domainForHost(ONION_X)).isEqualTo(DomainRegistry.DEFAULT_DOMAIN);
+            assertThat(reg.domainForHost(ONION_Y)).isEqualTo("brandy");
+            assertThat(reg.domainForHost(ONION_Z)).isNull();
+        }
+
+        @Test
         void unreadableFile_keepsTheLastKnownGoodMap() throws Exception {
             var f = write("hosts.map", ONION_X + "=brandx\n");
             DomainRegistry reg = new DomainRegistry("https://id.brandx.tld", ISSUERS, "",
