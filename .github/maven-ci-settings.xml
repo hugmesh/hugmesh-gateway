@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  CI-ONLY Maven settings for the container-image build in .github/workflows/release.yml.
+
+  hugmesh-gateway depends on net.hugmesh:hugmesh-commons (pom.xml), and that artifact's own
+  parent is net.hugmesh:hugmesh-parent. Neither is on Maven Central; both are published to
+  GitHub Packages (maven.pkg.github.com/hugmesh/<repo>), one URL per repository.
+
+  HOW IT IS REACHED
+  =================
+  The Dockerfile copies this file in and points Maven at it through MAVEN_ARGS="-s ..."
+  ONLY when the BuildKit secret `packages_read_token` is mounted (the GitHub release
+  workflow). Nothing else uses it:
+    - a developer's ./mvnw and the compose lane never see it. The compose lane gets its
+      own settings from hugmesh-generator/scripts/patch-stack-src.sh (hugmesh-local-
+      settings.xml via ENV MAVEN_ARGS), which is why this repo deliberately has NO
+      root-level settings.xml and the mvnw lines carry NO `-s`.
+    - maven.pkg.github.com answers 401 to an unauthenticated GET, so these URLs must not be
+      declared in pom.xml: that would break every unauthenticated build.
+
+  NO SECRET IS COMMITTED HERE. The Dockerfile reads the token from the secret mount and
+  exports it as UPSTREAM_PACKAGES_TOKEN for the one RUN that needs it; the username comes
+  from the UPSTREAM_PACKAGES_ACTOR build-arg. GITHUB_TOKEN is deliberately NOT used: it is
+  scoped to this repository and cannot read another repository's package unless that
+  package grants this repository under "Manage Actions access".
+
+  Only the two upstream links this build resolves are declared. A repository that answers
+  401/403 fails Maven's whole resolution, so declaring hugmesh-build-config (a plugin
+  classpath artifact the gateway never runs) would add a way to fail for nothing.
+-->
+<settings xmlns="http://maven.apache.org/SETTINGS/1.0.0"
+          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+          xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.0.0 http://maven.apache.org/xsd/settings-1.0.0.xsd">
+
+  <servers>
+    <server>
+      <id>github-hugmesh-parent</id>
+      <username>${env.UPSTREAM_PACKAGES_ACTOR}</username>
+      <password>${env.UPSTREAM_PACKAGES_TOKEN}</password>
+    </server>
+    <server>
+      <id>github-hugmesh-commons</id>
+      <username>${env.UPSTREAM_PACKAGES_ACTOR}</username>
+      <password>${env.UPSTREAM_PACKAGES_TOKEN}</password>
+    </server>
+  </servers>
+
+  <profiles>
+    <profile>
+      <id>github-hugmesh-packages</id>
+      <repositories>
+        <repository>
+          <id>github-hugmesh-parent</id>
+          <url>https://maven.pkg.github.com/hugmesh/hugmesh-parent</url>
+          <releases><enabled>true</enabled></releases>
+          <snapshots><enabled>false</enabled></snapshots>
+        </repository>
+        <repository>
+          <id>github-hugmesh-commons</id>
+          <url>https://maven.pkg.github.com/hugmesh/hugmesh-commons</url>
+          <releases><enabled>true</enabled></releases>
+          <snapshots><enabled>false</enabled></snapshots>
+        </repository>
+      </repositories>
+    </profile>
+  </profiles>
+
+  <activeProfiles>
+    <activeProfile>github-hugmesh-packages</activeProfile>
+  </activeProfiles>
+</settings>

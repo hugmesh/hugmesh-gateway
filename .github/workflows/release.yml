@@ -20,7 +20,9 @@ env:
 
 jobs:
   build-and-push:
-    runs-on: ubuntu-latest
+    # RUNS_ON is a repo variable holding a JSON runner spec (the org's self-hosted runner);
+    # unset, it falls back to a GitHub-hosted runner.
+    runs-on: ${{ fromJSON(vars.RUNS_ON || '"ubuntu-latest"') }}
     permissions:
       contents: read
       packages: write
@@ -28,14 +30,72 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
+      # The dispatch input reaches the shell through env, never by expression interpolation inside run:
+      # (an expression there is pasted into the script text, so a crafted tag is code).
       - name: Compute image tag
         id: vars
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
         run: |
-          if [ -n "${{ inputs.tag }}" ]; then
-            echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          set -eu
+          if [ -n "${INPUT_TAG}" ]; then
+            case "${INPUT_TAG}" in
+              *[!A-Za-z0-9_.-]*|.*|-*)
+                echo "::error::tag '${INPUT_TAG}' is not a valid image tag (allowed: letters, digits, '_', '.', '-'; may not start with '.' or '-')"
+                exit 1
+                ;;
+            esac
+            tag="${INPUT_TAG}"
           else
-            echo "tag=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+            tag="$(git rev-parse --short HEAD)"
           fi
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+
+      # PREFLIGHT - CROSS-REPO PACKAGE READ. The image build resolves net.hugmesh:
+      # hugmesh-commons and its parent net.hugmesh:hugmesh-parent, published from OTHER
+      # repositories. secrets.GITHUB_TOKEN is scoped to this repository and cannot read
+      # them unless each package names this repository under "Manage Actions access", so
+      # prefer the operator's read:packages PAT (secret PACKAGES_READ_TOKEN). Without this
+      # step a missing grant surfaces ten minutes later as "Could not find artifact
+      # net.hugmesh:hugmesh-commons ... in central", which reads like "not published".
+      # A 200 proves this credential can read that registry; it does NOT prove the exact
+      # version pinned in pom.xml exists - maven says that, accurately, in the build.
+      - name: Preflight, cross-repo package read
+        env:
+          UPSTREAM_PACKAGES_ACTOR: ${{ secrets.PACKAGES_READ_ACTOR || github.actor }}
+          UPSTREAM_PACKAGES_TOKEN: ${{ secrets.PACKAGES_READ_TOKEN || secrets.GITHUB_TOKEN }}
+          HAS_PACKAGES_READ_TOKEN: ${{ secrets.PACKAGES_READ_TOKEN != '' }}
+        run: |
+          set -uo pipefail
+          if [ "${HAS_PACKAGES_READ_TOKEN}" = "true" ]; then
+            echo "read credential: secrets.PACKAGES_READ_TOKEN (operator-held PAT)"
+          else
+            echo "read credential: the automatic secrets.GITHUB_TOKEN. It can only read an upstream"
+            echo "package that has granted THIS repository under 'Manage Actions access'."
+          fi
+          rc=0
+          for upstream in hugmesh-parent hugmesh-commons; do
+            url="https://maven.pkg.github.com/hugmesh/${upstream}/net/hugmesh/${upstream}/maven-metadata.xml"
+            code=$(curl -sS -o /dev/null -w '%{http_code}' -u "${UPSTREAM_PACKAGES_ACTOR}:${UPSTREAM_PACKAGES_TOKEN}" "${url}" || echo 000)
+            case "${code}" in
+              200)
+                echo "  readable    hugmesh/${upstream}"
+                ;;
+              401|403)
+                echo "::error::CANNOT AUTHENTICATE to hugmesh/${upstream} (HTTP ${code}). This is NOT 'the upstream is unpublished'. Fix: set the PACKAGES_READ_TOKEN secret to a PAT with read:packages, or grant this repository under that package's 'Manage Actions access'."
+                rc=1
+                ;;
+              404)
+                echo "::error::NOT READABLE at hugmesh/${upstream} (HTTP 404). Two causes look identical: (a) nothing is published to that registry yet - run that repo's Release workflow first (order: build-config, parent, commons); (b) it is published but this credential cannot see it, because GitHub masks an unauthorised read of a private package as 404. Check the package page before re-publishing anything."
+                rc=1
+                ;;
+              *)
+                echo "::error::unexpected HTTP ${code} from hugmesh/${upstream}. Not classified - do not assume 'unpublished'."
+                rc=1
+                ;;
+            esac
+          done
+          exit ${rc}
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -49,9 +109,18 @@ jobs:
 
       - name: Build and push image
         uses: docker/build-push-action@v6
+        env:
+          # No build-record upload: it is a separate artifact upload that can fail the job
+          # after a successful push, and nothing here reads it.
+          DOCKER_BUILD_RECORD_UPLOAD: "false"
         with:
           context: .
           push: true
+          build-args: |
+            UPSTREAM_PACKAGES_ACTOR=${{ secrets.PACKAGES_READ_ACTOR || github.actor }}
+          # BuildKit secret, mounted only for the two mvnw RUN steps (see Dockerfile).
+          secrets: |
+            packages_read_token=${{ secrets.PACKAGES_READ_TOKEN || secrets.GITHUB_TOKEN }}
           tags: |
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.vars.outputs.tag }}
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
