@@ -54,10 +54,10 @@ jobs:
       # PREFLIGHT - CROSS-REPO PACKAGE READ. The image build resolves net.hugmesh:
       # hugmesh-commons and its parent net.hugmesh:hugmesh-parent, published from OTHER
       # repositories. secrets.GITHUB_TOKEN is scoped to this repository and cannot read
-      # them unless each package names this repository under "Manage Actions access", so
-      # prefer the operator's read:packages PAT (secret PACKAGES_READ_TOKEN). Without this
-      # step a missing grant surfaces ten minutes later as "Could not find artifact
-      # net.hugmesh:hugmesh-commons ... in central", which reads like "not published".
+      # them, so the read credential is the operator's read:packages PAT, the secret
+      # PACKAGES_READ_TOKEN (operator decision 90a=B). Without this step a missing token
+      # surfaces ten minutes later as "Could not find artifact net.hugmesh:hugmesh-commons
+      # ... in central", which reads like "not published".
       # A 200 proves this credential can read that registry; it does NOT prove the exact
       # version pinned in pom.xml exists - maven says that, accurately, in the build.
       - name: Preflight, cross-repo package read
@@ -70,8 +70,8 @@ jobs:
           if [ "${HAS_PACKAGES_READ_TOKEN}" = "true" ]; then
             echo "read credential: secrets.PACKAGES_READ_TOKEN (operator-held PAT)"
           else
-            echo "read credential: the automatic secrets.GITHUB_TOKEN. It can only read an upstream"
-            echo "package that has granted THIS repository under 'Manage Actions access'."
+            echo "read credential: the automatic secrets.GITHUB_TOKEN, because the PACKAGES_READ_TOKEN"
+            echo "secret is not set. It cannot read another repository's package; expect the probe below to fail."
           fi
           rc=0
           for upstream in hugmesh-parent hugmesh-commons; do
@@ -82,11 +82,11 @@ jobs:
                 echo "  readable    hugmesh/${upstream}"
                 ;;
               401|403)
-                echo "::error::CANNOT AUTHENTICATE to hugmesh/${upstream} (HTTP ${code}). This is NOT 'the upstream is unpublished'. Fix: set the PACKAGES_READ_TOKEN secret to a PAT with read:packages, or grant this repository under that package's 'Manage Actions access'."
+                echo "::error::CANNOT AUTHENTICATE to hugmesh/${upstream} (HTTP ${code}). This is NOT 'the upstream is unpublished'. Fix: set the PACKAGES_READ_TOKEN repo secret (classic PAT, read:packages), or share the org secret of that name with this repository."
                 rc=1
                 ;;
               404)
-                echo "::error::NOT READABLE at hugmesh/${upstream} (HTTP 404). Two causes look identical: (a) nothing is published to that registry yet - run that repo's Release workflow first (order: build-config, parent, commons); (b) it is published but this credential cannot see it, because GitHub masks an unauthorised read of a private package as 404. Check the package page before re-publishing anything."
+                echo "::error::NOT READABLE at hugmesh/${upstream} (HTTP 404). Two causes look identical: (a) nothing is published to that registry yet - run that repo's Release workflow first (order: build-config, parent, commons); (b) it is published but this credential cannot see it, because GitHub masks an unauthorised read of a private package as 404 (the usual cause is a missing PACKAGES_READ_TOKEN secret). Check the package page before re-publishing anything."
                 rc=1
                 ;;
               *)

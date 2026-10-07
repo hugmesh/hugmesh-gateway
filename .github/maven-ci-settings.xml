@@ -20,9 +20,9 @@
 
   NO SECRET IS COMMITTED HERE. The Dockerfile reads the token from the secret mount and
   exports it as UPSTREAM_PACKAGES_TOKEN for the one RUN that needs it; the username comes
-  from the UPSTREAM_PACKAGES_ACTOR build-arg. GITHUB_TOKEN is deliberately NOT used: it is
-  scoped to this repository and cannot read another repository's package unless that
-  package grants this repository under "Manage Actions access".
+  from the UPSTREAM_PACKAGES_ACTOR build-arg. The read credential is the
+  PACKAGES_READ_TOKEN secret (classic PAT, read:packages). The automatic GITHUB_TOKEN is
+  scoped to this repository and cannot read another repository's package.
 
   Only the two upstream links this build resolves are declared. A repository that answers
   401/403 fails Maven's whole resolution, so declaring hugmesh-build-config (a plugin
