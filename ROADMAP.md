@@ -53,7 +53,9 @@ work. Each maps to source in this repo.
 
 The numbers follow the original design brief. Each item is a discrete deliverable.
 Cross-repo items name their target repo(s). Items 3 and 6 are done and stay here
-so the numbers hold.
+so the numbers hold. Items 1, 2, 8, 9, 10 and 11 are plans, and nobody re-checked
+them against the other repos on 2026-10-07. Items 5 and 7 were checked, and parts of
+them exist in `hugmesh-games` (see each item).
 
 ### 1. Per-instance deployment config — same image, different name 🔭
 
@@ -91,7 +93,13 @@ so the numbers hold.
 - **Acceptance** (met by the prune loop): rotating a user out of the source role
   removes their derived grant within the configured sync interval.
 
-### 5. External-OAuth registration — federated remote 🔭
+### 5. External-OAuth registration — federated remote 🔭 (part exists in `hugmesh-games`)
+
+- **Found 2026-10-07**: `hugmesh-games` (`frontend/projects/registration`) has a
+  `registration` remote with "Continue with GitHub". It posts to
+  `/api/registration/github-org-admin/evaluate` (the `hugmesh-actions` service), not to
+  the `POST /api/registration/external` below. No repo in the org has that endpoint.
+  The user-linking part of this item is still a plan.
 
 - **Repo**: the platform front-end (a new federated Angular `registration` remote,
   served through the gateway's `/_remotes/registration/**` shell).
@@ -117,7 +125,13 @@ so the numbers hold.
 - **Acceptance**: integration tests stub GitHub's `/user/repos` + `/user/orgs` and
   assert the grant fires (see that repo's test suite).
 
-### 7. Banned-user remote module 🔭
+### 7. Banned-user remote module 🔭 (built in `hugmesh-games`)
+
+- **Found 2026-10-07**: `hugmesh-games` (`frontend/projects/banned`) has a `banned`
+  remote. It shows the revocation reason and key and a pre-filled appeal email, and it
+  is mounted at `/_remotes/banned/**` by that repo's `frontend/nginx.conf`. Whether the
+  platform front door serves it was not checked. `hugmesh-login-ui` has its own
+  `/login/appeal` page, fed by `GET /bff/public/appeal-contact`.
 
 - **Repo**: the platform front-end (`/_remotes/banned/**`).
 - **Work**: when the gateway denies a revoked or banned principal, the host shell
