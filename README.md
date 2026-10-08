@@ -5,7 +5,14 @@ platform's public front door. **One image, many roles**: the same artifact runs 
 the PKI/identity gateway, the backend (BFF/API) gateway, or the front-end (UI)
 gateway, differentiated only by `SPRING_APPLICATION_NAME` (e.g. `hugmesh-pki-gateway`,
 `hugmesh-be-gateway`, `hugmesh-fe-gateway`, or per-brand
-`${BRAND}-{pki,be,fe}-gateway`). It is a Casdoor-aware OAuth2 **resource server**;
+`${BRAND}-{pki,be,fe}-gateway`). The repos
+[`hugmesh-pki-gateway`](https://github.com/hugmesh/hugmesh-pki-gateway),
+[`hugmesh-be-gateway`](https://github.com/hugmesh/hugmesh-be-gateway) and
+[`hugmesh-fe-gateway`](https://github.com/hugmesh/hugmesh-fe-gateway) are thin
+overlays: a `Dockerfile` that builds `FROM` this image and sets the instance name,
+plus a profile file and a route seed. They hold no gateway code. The cluster chart
+in `hugmesh-generator` (`specs/cluster/charts/hugmesh-gateway`) runs the shared
+image with per-instance environment. It is a Casdoor-aware OAuth2 **resource server**;
 it never exposes its own login — tokens are minted by Casdoor (the BFF proxies the
 grant) and validated here.
 
@@ -14,7 +21,10 @@ reactive Cassandra + R2DBC Postgres). The gateway tracks the unified platform
 ecosystem baseline and consumes the shared
 [`hugmesh-commons`](https://github.com/hugmesh/hugmesh-commons) 2.1.0 artifact
 (`net.hugmesh.commons.*` security/tenancy) as a **direct, explicitly-versioned
-dependency** — it deliberately keeps `spring-boot-starter-parent` rather than the
+dependency**. No source file imports it yet: the gateway keeps its own `Roles`,
+`DomainRegistry`, `CasdoorAuthorities` and `TenancyResourceServerConfig`, because
+its `Roles` and `DomainRegistry` carry methods commons lacks (`pom.xml` comment).
+It deliberately keeps `spring-boot-starter-parent` rather than the
 BFF-focused [`hugmesh-parent`](https://github.com/hugmesh/hugmesh-parent) metapom,
 and does **not** depend on
 [`hugmesh-auth-core`](https://github.com/hugmesh/hugmesh-auth-core) (that
@@ -45,9 +55,10 @@ On `main`, post the recent ecosystem unification + auth-model change:
   PKCE/state handshake and the internal Casdoor `/api/login` + code→token exchange
   **server-side** and holds per-session JWT custody/refresh. The browser is
   **never redirected to Casdoor** and only ever holds an **opaque
-  `bff_`-prefixed session**. Account/session login
-  logic is being relocated out of admin-bff into user-bff with the shared core
-  extracted to `hugmesh-auth-core`; account/session DATA stays in admin-bff-db.
+  `bff_`-prefixed session**. The native-login
+  endpoints live in user-bff (`SsoAuthController`, behind `app.bff.oidc.enabled`,
+  default off in that repo), built on the shared `hugmesh-auth-core`;
+  account/session DATA stays in admin-bff-db.
   **None of that login/relocation work lives in this repo.** What *does* live here:
   two filters that let the gateway accept that opaque `bff_` session
   (a JWT-only resource server otherwise 401s it at the decoder):
@@ -55,7 +66,7 @@ On `main`, post the recent ecosystem unification + auth-model change:
     path: resolves a `bff_` (Bearer header **or** `bff_session` cookie) via admin-bff
     `GET /bff/internal/session/introspect` (over the `X-Internal-Token` back-channel)
     and populates the SecurityContext directly. **Live by default**
-    (`APP_BFF_SESSION_ENABLED` defaults to `true`, PR #70) — set it to `false` to
+    (`APP_BFF_SESSION_ENABLED` defaults to `true`) — set it to `false` to
     dark-disable.
   - `BffJwtExchangeWebFilter` (gate `hugmesh.gateway.bff-exchange.enabled`) — the
     **exchange** path: swaps `bff_`→internal **custody JWT** via admin-bff over the
@@ -86,7 +97,8 @@ On `main`, post the recent ecosystem unification + auth-model change:
 
 ## Request pipeline
 
-Up to three `bff_` bridges may run **pre-security** (before
+`BffJsonNoStoreWebFilter` always runs first. Up to three `bff_` bridges may run
+**pre-security** (before
 `WebFilterChainProxy(-100)`) — see *Opaque `bff_` session handling*. Two
 (`BffCookieToBearerWebFilter` + `BffJwtExchangeWebFilter`) are dark by default and
 absent unless their shared flag is on; the third (`BffSessionAuthFilter`) is live by
@@ -95,19 +107,24 @@ a public/homeserver path), and these ordered `WebFilter`s run:
 
 | Order | Filter | Purpose |
 |------:|--------|---------|
+| HIGHEST+3 | `BffJsonNoStoreWebFilter` *(always on)* | on every `/bff/**` response with a JSON content type, force `Cache-Control: no-cache, no-store, max-age=0, must-revalidate` plus `Pragma` and `Expires`, even over a weaker upstream header; set in a `beforeCommit` hook, so it also covers security-chain 401/403 |
 | HIGHEST+4 | `BffCookieToBearerWebFilter` *(dark)* | pre-security cookie-mode bridge: synthesises `Authorization: Bearer bff_…` from the `bff_session` cookie (which is **retained** on the forwarded request) so a cookie-only browser request reaches the exchange filter below; **absent** unless `hugmesh.gateway.bff-exchange.enabled` (same flag as the exchange filter) |
 | HIGHEST+5 | `BffJwtExchangeWebFilter` *(dark)* | pre-security `bff_`→custody-JWT swap; **absent** unless `hugmesh.gateway.bff-exchange.enabled` |
 | HIGHEST+50 | `BffSessionAuthFilter` *(live by default)* | pre-security `bff_`/cookie introspection → SecurityContext; present unless `app.bff-session.enabled=false` |
 | 10 | `RevocationGatewayFilter` | reject revoked **Casdoor JWTs** (Cassandra-cached revocation list) |
-| 11 | `HomeserverTokenRevocationFilter` | resolve the opaque **Matrix/Mastodon bearer** and deny revoked tokens (ban / per-credential / external-client); fail-closed once `app.hs-revocation.enabled` |
+| 11 | `HomeserverTokenRevocationFilter` | resolve the opaque **Matrix/Mastodon bearer** and deny revoked tokens (ban / per-credential / external-client); fail-closed once `app.hs-revocation.enabled` is on (**default off**) |
 | 20 | `ExternalAuthHeaderFilter` | inject `External-Authorization` headers when an external-OAuth token is present (**additive**; never required) |
 | 25 | `GatewayRouteAccessFilter` | **per-gateway external-access gate + domain scoping** — which roles/users may reach which URLs from outside *this* gateway, and which **brand** they belong to |
 | 30 | `ResourceAccessFilter` | per-resource grants for the **optional, opt-in** games service (`game:{slug}`, `session:{id}`); inert unless games is deployed |
 
-Routes themselves come from `UrlRegistryRouteDefinitionLocator` (a
-`RouteDefinitionLocator`): the static boot routes seed a URL registry, and apps
-register additional routes at runtime via `UrlRegistryService`, picked up on the
-next refresh tick.
+Routes come from two sources that Spring Cloud Gateway merges: the static routes
+in `application.yml` (`spring.cloud.gateway.server.webflux.routes`, one default
+`/api/**` route), and the Cassandra `url_registry` table, which
+`UrlRegistryRouteDefinitionLocator` turns into route definitions. The registry is
+seeded on boot with one baked-in route (`/be/**` to `hugmesh-be-gateway`, with
+`StripPrefix=1`; `app.url-registry.seed-defaults.enabled`), apps register more at
+runtime via `UrlRegistryService`, and a change is picked up on the next refresh
+tick (10 s).
 
 The same pipeline, as a flow (`BffCookieToBearerWebFilter` + `BffJwtExchangeWebFilter`
 are dark/flag-gated behind one shared flag; `BffSessionAuthFilter` is live by
@@ -118,7 +135,8 @@ everything from `RevocationGatewayFilter` down always runs):
 flowchart TD
     Req(["Inbound request"])
 
-    subgraph PreSecurity["Pre-security bff_ bridges (fixed relative order)"]
+    subgraph PreSecurity["Pre-security filters (fixed relative order)"]
+        BJN["BffJsonNoStoreWebFilter (always on)<br/>order HIGHEST_PRECEDENCE+3"]
         BCB["BffCookieToBearerWebFilter (dark)<br/>order HIGHEST_PRECEDENCE+4"]
         BJE["BffJwtExchangeWebFilter (dark)<br/>order HIGHEST_PRECEDENCE+5"]
         BSA["BffSessionAuthFilter (live by default)<br/>order HIGHEST_PRECEDENCE+50"]
@@ -137,7 +155,8 @@ flowchart TD
     Route["UrlRegistryRouteDefinitionLocator routing"]
     Down(["Downstream BFF / API / homeserver"])
 
-    Req --> BCB
+    Req --> BJN
+    BJN --> BCB
     BCB --> BJE
     BJE --> BSA
     BSA --> Sec
@@ -158,12 +177,16 @@ authorities regardless of which path validated it. From a validated Casdoor JWT:
 
 - every authenticated principal floors to `ROLE_USER`;
 - each `roles` claim entry (string **or** Casdoor's `{name: …}` object shape) →
-  `ROLE_<UPPER>`;
-- each `permissions` entry → verbatim authority, **except** entries carrying a
-  reserved `ROLE_`/`DOMAIN_` prefix, which are **dropped** (`RESERVED_PREFIXES` in
-  `CasdoorAuthorities`) so a permission string can never forge a role or a tenant
-  scope (authority-injection defense);
+  `ROLE_<UPPER>`; one leading `ROLE_` on the claim is stripped first, so `admin`
+  and `ROLE_ADMIN` both give `ROLE_ADMIN`;
+- each `permissions` entry → verbatim authority, **except** entries starting with
+  `ROLE_`, `DOMAIN_` or `MFA_SATISFIED`, which are **dropped** (`RESERVED_PREFIXES`
+  in `CasdoorAuthorities`) so a permission string can never forge a role, a tenant
+  scope or the MFA marker (authority-injection defense);
 - legacy `isAdmin: true` → `ROLE_ADMIN`;
+- when `app.mfa.enabled` is on (default off): a `MFA_SATISFIED` marker, only if the
+  `mfa_satisfied_at` claim (epoch milliseconds, as a string) is no older than
+  `app.mfa.freshness-window` (default 600000, ten minutes) and not in the future;
 - exactly **one** issuer-derived `DOMAIN_<x>` authority (see *Multi-tenancy*),
   keyed on the cryptographically-validated `iss` — never a user-settable claim.
   `DOMAIN_<x>` carries **no** `ROLE_` prefix, so it can never satisfy a
@@ -175,11 +198,26 @@ issuer-keyed `domainOf(jwt, registry)`.
 
 ### Coarse path gate (SecurityConfig)
 
-The resource-server `SecurityWebFilterChain` applies the coarse, role-only floor:
+The resource-server `SecurityWebFilterChain` applies the coarse, role-only floor.
+`authorizeExchange` takes the first rule that matches, in this order:
 
+- **PKI tier only: the headscale Host.** Every request on the `Host` of the route
+  with id `headscale` needs `ROLE_SUPERADMIN`, on every path. This rule is first, so
+  nothing below it is public on that Host (anonymous gets 401, anyone else 403). The
+  Host patterns come from that route's own `Host` predicate; a pki instance that has
+  a `headscale` route whose Host cannot be read refuses to start.
 - **Public** (`permitAll`): `/api/auth/**`, `/api/registration/**`, `/api/login/**`,
-  the `/_remotes/{login,registration,banned}/**` federated UI shells, and
-  `/bff/public/announcements/**` (the unauthenticated pre-auth login banners).
+  `/_remotes/{login,registration,banned}/**`, `/bff/public/announcements/**`,
+  `/bff/public/appeal-contact`, `/bff/public/theme`, `/bff/public/theme.css`,
+  `/bff/password-reset/request`, `/bff/password-reset/confirm` and `/bff/login`
+  (the native-login credential POST). The `/bff/public/*` paths and the password-reset
+  paths are exact matches, not subtrees.
+- **FE tier only** (instance name ends in `-fe-gateway`), `GET` only, `permitAll`: the
+  SPA shell (`/`, `/index.html`, `/favicon.ico`, `/importmap.json`,
+  `/remoteEntry.json`, `/*.js`, `/*.css`, `/assets/**`), `/login/**`,
+  `/api/federation/vanity`, `/api/federation/vanity/**` and
+  `/api/federation/capabilities`. On the pki and be tiers (and for an unknown
+  instance name) these stay on the authenticated floor.
 - **Homeserver passthrough** (`permitAll` at the OAuth2 layer): `/_matrix/**`,
   `/api/v1/**`, `/api/v2/**`, `/oauth/**`, `/.well-known/**` — these carry an
   opaque Matrix/Mastodon bearer, **not** a Casdoor JWT, so requiring a JWT here
@@ -191,6 +229,9 @@ The resource-server `SecurityWebFilterChain` applies the coarse, role-only floor
   never reach infra (isolation invariant). Domain scoping of admin's infra reach is
   applied downstream by `GatewayRouteAccessFilter` (which can see `Host`).
 - everything else — authenticated.
+
+CSRF protection is off by design: the gateway takes bearer tokens, not form
+posts. `CsrfDocGuardTest` fails if someone turns it on.
 
 A minimal `RoleHierarchy` (`SUPERADMIN > ADMIN/MOD/USER`) smooths `@PreAuthorize`
 ergonomics only; `ADMIN` and `MOD` are deliberately **siblings** (no `ADMIN > MOD`
@@ -207,12 +248,12 @@ accept that opaque session. They are alternative approaches to the same gap,
 selected per deployment; flipping either flag on with the other off is the expected
 mode, and that's exactly the shipped default today: `BffSessionAuthFilter`
 (introspection) is **live by default** (`app.bff-session.enabled` defaults to
-`true`, PR #70) while `BffJwtExchangeWebFilter` (exchange) stays **dark**
+`true`) while `BffJwtExchangeWebFilter` (exchange) stays **dark**
 (`hugmesh.gateway.bff-exchange.enabled` defaults to `false`). Explicitly
 setting both flags off is the only way to get back to the pure-JWT-only behavior
 described above.
 
-A third filter, `BffCookieToBearerWebFilter` (#66, same flag as the exchange path,
+A third filter, `BffCookieToBearerWebFilter` (same flag as the exchange path,
 order `HIGHEST_PRECEDENCE + 4`), sits one slot ahead of `BffJwtExchangeWebFilter` and
 synthesises `Authorization: Bearer bff_…` from the `bff_session` cookie (which is
 **retained** on the forwarded request — consuming it starved the cookie-terminated
@@ -221,19 +262,20 @@ BFF surfaces, notably user-bff's permitAll `GET /bff/session`) when no
 source" below is really *header **or** cookie*, mirroring `BffSessionAuthFilter`'s
 dual token source. See *Request pipeline* above.
 
-| | `BffJwtExchangeWebFilter` (#48) | `BffSessionAuthFilter` (#51) |
+| | `BffJwtExchangeWebFilter` | `BffSessionAuthFilter` |
 |---|---|---|
-| **Flag** | `hugmesh.gateway.bff-exchange.enabled` (default **off**) | `app.bff-session.enabled` (default **on**, PR #70) |
+| **Flag** | `hugmesh.gateway.bff-exchange.enabled` (default **off**) | `app.bff-session.enabled` (default **on**) |
 | **Approach** | **Exchange** — swaps `bff_` → internal **custody JWT**, rewrites `Authorization: Bearer <custody-jwt>` so the *unchanged* JWT decoder + authz chain run as for a native JWT caller | **Introspection** — resolves `bff_` and populates the `ReactiveSecurityContextHolder` directly (mints a `UsernamePasswordAuthenticationToken`); the downstream JWT filter then finds an existing authentication and short-circuits |
-| **BFF call** | `POST {admin-bff}/bff/internal/session/exchange` over the **mTLS + `X-Internal-Token`** back-channel (reuses the dark `hugmesh.gateway.mtls.enabled` leg) | `GET {admin-bff}/bff/internal/session/introspect` with the `bff_` as a bearer **+ the `X-Internal-Token` header** (the JWT-only `/bff/me` would 401 a `bff_`; the internal surface is `permitAll()` guarded by `InternalTokenWebFilter`); forwards the client IP as `X-Forwarded-For` |
+| **BFF call** | `POST {admin-bff}/bff/internal/session/exchange` over the **mTLS + `X-Internal-Token`** back-channel (reuses the dark `hugmesh.gateway.mtls.enabled` leg) | `GET {admin-bff}/bff/internal/session/introspect` with the `bff_` as a bearer **+ the `X-Internal-Token` header** (the JWT-only `/bff/me` would 401 a `bff_`; the internal surface is `permitAll()` guarded by `InternalTokenWebFilter`); forwards the client IP as `X-Forwarded-For`; paths in `app.bff-session.skip-paths` (the public and homeserver paths, `/actuator/**`) are never introspected |
 | **Token source** | `Authorization: Bearer bff_…` only | `Authorization: Bearer bff_…` **or** the `bff_session` cookie (so cookie-mode UIs work) |
 | **Order** | `HIGHEST_PRECEDENCE + 5` — **pre-security**, before `WebFilterChainProxy(-100)`, reads/rewrites only the raw header | `HIGHEST_PRECEDENCE + 50` — also before the OAuth2 `BearerTokenAuthenticationWebFilter`, populates the context before it runs |
 | **Authorities** | inherited from the swapped-in JWT via `CasdoorAuthorities` (identical to a native JWT) | mapped from the introspect response body: `ROLE_<UPPER>` per role + always-on `ROLE_USER` floor + `MFA_SATISFIED` when `mfaSatisfied`; an **incomplete-registration** account is capped to `ROLE_USER` only |
-| **Fail-closed** | any exchange failure (non-2xx / timeout / empty body) ⇒ **401**, the raw `bff_` is **never** forwarded; positive swaps *may* be cached on `sha256(bff_)`, but the cache is **OFF by default** since 2026-09-16 (`cache-ttl-ms` default **0** — operator decision on #2, "zero window now"): every `bff_` request round-trips to admin-bff. A deployment that opts in with a positive `cache-ttl-ms` gets a window clamped to the configurable `cache-ttl-max-ms` ceiling (default 60s; `cache-max-size` bounds the entry count). Suspension is enforced **admin-bff-side** on every non-cached exchange call (a suspended/banned account's swap is refused); a cache hit skips that round-trip, so any positive TTL is the suspension-staleness window (PR #68) — the shipped `0` is the zero-bypass-window, per-request-consult posture. | BFF 5xx/unreachable ⇒ **503** `session_backend_unavailable`; `status: suspended/banned` ⇒ **403** `X-BFF-Denied`; BFF 401 ⇒ pass-through unauthenticated (the `authenticated()` floor then 401s protected paths) |
+| **Fail-closed** | any exchange failure (non-2xx / timeout / empty body) ⇒ **401**, the raw `bff_` is **never** forwarded; positive swaps *may* be cached on `sha256(bff_)`, but the cache is **OFF by default** since 2026-09-16 (`cache-ttl-ms` default **0** — operator decision on #2, "zero window now"): every `bff_` request round-trips to admin-bff. A deployment that opts in with a positive `cache-ttl-ms` gets a window clamped to the configurable `cache-ttl-max-ms` ceiling (default 60s; `cache-max-size` bounds the entry count). Suspension is enforced **admin-bff-side** on every non-cached exchange call (a suspended/banned account's swap is refused); a cache hit skips that round-trip, so any positive TTL is the suspension-staleness window — the shipped `0` is the zero-bypass-window, per-request-consult posture. | BFF 5xx/unreachable ⇒ **503** `session_backend_unavailable`; `status: suspended/banned` or a BFF 403 ⇒ **403** `X-BFF-Denied`; BFF 401 ⇒ pass-through unauthenticated (the `authenticated()` floor then 401s protected paths) |
 
-`BffJwtExchangeWebFilter` also seeds a PUBLIC `/bff/login` route-access row
-(via `CanonicalSeed`) so the anonymous native-login credential POST reaches user-bff
-before it holds a session. In a default deployment `BffSessionAuthFilter` IS wired
+Independent of both filters, `CanonicalSeed.fe()` carries a PUBLIC `/bff/login`
+route-access row, and `SecurityConfig` lists `/bff/login` as public, so the
+anonymous native-login credential POST reaches user-bff before it holds a session.
+In a default deployment `BffSessionAuthFilter` IS wired
 (introspection resolves a `bff_` bearer/cookie to a SecurityContext) and
 `BffJwtExchangeWebFilter` is NOT; only with `app.bff-session.enabled=false` as well
 does neither bean exist and a `bff_` bearer fall back to 401ing at the JWT decoder.
@@ -261,7 +303,7 @@ datastore can't pile reads up on the scheduler. Toggle the whole gate with
 `app.route-access.enabled`.
 
 **Row shape** matches the contract: `(id, gateway, url_pattern, role, casdoor_user,
-allow, domain)`. `role` is the Spring authority form (`ROLE_ADMIN`, …; match is
+allow, domain, mfa_required, updated_at)`. `role` is the Spring authority form (`ROLE_ADMIN`, …; match is
 case-insensitive and `ROLE_`-prefix-tolerant); the sentinel `PUBLIC` permits
 anonymous traffic; `casdoor_user` optionally pins a rule to one Casdoor id/username;
 `domain` is the per-row brand scope.
@@ -272,14 +314,17 @@ present different sets. A Casdoor-JWT session presents the token's `sub` UUID an
 `name` username, plus the native-account forms derived from its claims
 (`casdoor:<handle>` and the bare lowercase handle, for each of
 email / preferred_username / sub / username). A native-login (`bff_`) session
-presents ONLY its durable account id (`casdoor:<handle>`, where the handle was
+presents its durable account id (`casdoor:<handle>`, where the handle was
 minted lowercase from email > preferred_username > sub at first login) and the
-bare handle — it does NOT carry the Casdoor UUID `sub`, nor (when the handle is
-an email) the bare username. So: write targeted pins in the account-id form
-`casdoor:<handle>` or as the bare lowercase handle to govern BOTH carriers; a pin
-written as the UUID `sub` or the bare Casdoor username governs only JWT sessions
-until the introspect contract carries the Casdoor id + username. When in doubt,
-write two rows — one per form; deny-wins makes the extra row harmless.
+bare handle. When admin-bff's introspect response carries the Casdoor `sub`, the
+session also presents it raw, as `casdoor:<lowercase sub>`, and as the bare
+lowercase value; an admin-bff that predates that field adds nothing. It never
+presents the bare Casdoor username, unless that equals the handle. So: write
+targeted pins in the account-id form `casdoor:<handle>` or as the bare lowercase
+handle to govern BOTH carriers. A pin written as the UUID `sub` governs both only
+when admin-bff sends the `sub`; a pin written as the bare Casdoor username governs
+JWT sessions only. When in doubt, write two rows — one per form; deny-wins makes
+the extra row harmless.
 
 **Decision (per request) — longest matching `url_pattern` wins** (Ant-style `**`),
 so `/api/admin/**=ROLE_ADMIN` overrides a broader `/api/**=ROLE_USER`:
@@ -290,7 +335,9 @@ so `/api/admin/**=ROLE_ADMIN` overrides a broader `/api/**=ROLE_USER`:
   target brand: an explicit `allow=false` for a held role/pinned user → **403**
   (deny wins);
 - else a held-role/pinned-user (or `PUBLIC`) `allow=true` → forward;
-- else (governed but not granted) → **403** + `X-Route-Denied: <gateway>:<path>`.
+- else (governed but not granted) → **403** + `X-Route-Denied: <gateway>:<path>`;
+- a granting row with `mfa_required` set, when `app.mfa.enabled` is on, is a
+  **403** unless the principal holds `MFA_SATISFIED`.
 
 ## Multi-tenancy / domain scoping
 
@@ -364,7 +411,7 @@ permission string (`RESERVED_PREFIXES`); `GatewayRouteAccessFilter` derives the
 principal's domain from the **validated issuer** (`Roles.domainOf(jwt, registry)`),
 never off the authorities list; and the legacy authorities-list overload
 `Roles.domainOf(authorities)` fails closed on zero or more-than-one `DOMAIN_`.
-(Landed via PR #18 → #19 → #20; this paragraph describes current `main`.)
+(This paragraph describes current `main`.)
 
 ## Revocation API (`GatewayRevocationController`)
 
@@ -379,7 +426,7 @@ side that feeds it. Under `/api/gateway/revocations`, gated at the class level o
 | `DELETE` | `/api/gateway/revocations/{key}` | `ROLE_ADMIN`+ | clear a revocation key |
 | `GET` | `/api/gateway/revocations` | `ROLE_SUPERADMIN` | snapshot of the current revocation list (observability) |
 
-**Cross-tenant gate (CWE-639 / BFLA, ✅ shipped — PR #30).** Each revocation key
+**Cross-tenant gate (CWE-639 / BFLA, ✅ shipped).** Each revocation key
 records its **owning domain** (the writer's issuer-derived `Roles.domainOf(jwt,
 registry)`, never a user-settable claim). A non-`SUPERADMIN` caller is rejected with
 **403** when it tries to clear — or overwrite/refresh — a key owned by a *different*
@@ -422,8 +469,8 @@ unscoped/`default`-owned key remains writable single-tenant (back-compat).
   startup with an error naming the store and its password key (see *Known Gaps*).
 - **PKI cert-chain builder** — this repo is the canonical home of the platform
   cert-chain builder: [`scripts/pki/build-chained-cert.sh`](scripts/pki/build-chained-cert.sh)
-  mints leaf/intermediate certs off a shared root (one root, two intermediates,
-  per-stack/per-brand leaves). The rationale is recorded in
+  mints one intermediate per run off a shared root, then a server leaf and an mTLS
+  client leaf signed by it (it runs `openssl` and `keytool` in Docker). The rationale is recorded in
   [ADR 001 — Cert-chain hierarchy](docs/decisions/001-cert-chain-hierarchy.md).
   (The gateway is the natural home: it's the first thing every external request
   hits and the canonical TLS terminator.)
@@ -443,7 +490,9 @@ unscoped/`default`-owned key remains writable single-tenant (back-compat).
 | `APP_TENANCY_HOSTS_FILE_REFRESH_MS` | re-read interval for that file (default `5000`) |
 | `HUGMESH_GATEWAY_MTLS_ENABLED` + `HUGMESH_TLS_*` | downstream mTLS leg |
 | `HUGMESH_GATEWAY_BFF_EXCHANGE_ENABLED` | enable the dark `bff_`→custody-JWT exchange filter (default off) |
-| `APP_BFF_SESSION_ENABLED` / `BFF_BASE_URL` | the `bff_`/cookie introspection filter (default **on**, PR #70) + its admin-bff base URL; set the former to `false` to dark-disable |
+| `APP_BFF_SESSION_ENABLED` / `BFF_BASE_URL` | the `bff_`/cookie introspection filter (default **on**) + its admin-bff base URL; set the former to `false` to dark-disable |
+| `APP_MFA_ENABLED` / `APP_MFA_FRESHNESS_WINDOW` / `APP_MFA_ENFORCE_PRIVILEGED_FLOOR` | MFA floor (default off / `600000` ms / off) |
+| `APP_DOMAIN_HEADER_FORWARD` | stamp the Host-derived brand as outbound `X-Domain` (default off; the inbound header is always stripped) |
 | `INTERNAL_TOKEN` | `X-Internal-Token` sent on the `/bff/internal/session/{introspect,exchange}` back-channel; blank ⇒ dev (non-enforcing). Same secret for both the introspection and exchange legs |
 | `PORT` | listen port (default 8080) |
 
@@ -456,6 +505,13 @@ Management endpoints expose only `health,info,metrics`, with health details gate
 ./mvnw test            # unit + context tests, no external services required
 docker build -t hugmesh-systems/gateway:dev .
 ```
+
+`hugmesh-commons` and its parent `hugmesh-parent` are not on Maven Central. Maven
+reads them from GitHub Packages (`maven.pkg.github.com/hugmesh/hugmesh-commons` and
+`.../hugmesh-parent`), so a machine that has not cached them needs a `read:packages`
+credential in its Maven settings. The release workflow passes one as the secret
+`PACKAGES_READ_TOKEN`. `make pentest` runs the CI `pentest` checks locally: SCA
+always, DAST when `DAST_TARGET_URL` is set (see the `Makefile`).
 
 Running `./mvnw verify` locally before opening a pull request is recommended —
 see *CI / security* below for why GitHub Actions alone won't catch regressions yet.
@@ -616,7 +672,7 @@ convention: ✅ shipped = on main · 🚧 in-flight = on an open branch/PR · �
   opaque-session story are now on `main` (see *Opaque `bff_` session handling*
   above): the `BffSessionAuthFilter` introspection bridge (`bff_`/cookie →
   `GET /bff/internal/session/introspect` → SecurityContext, gate
-  `app.bff-session.enabled`) **ships live by default** (PR #70) and the
+  `app.bff-session.enabled`) **ships live by default** and the
   pre-security `BffJwtExchangeWebFilter` (swap `bff_`→custody JWT, gate
   `hugmesh.gateway.bff-exchange.enabled`) still **ships dark**. 🚧 **Still
   owed:** confirming admin-bff's `/bff/internal/session/introspect` endpoint is
@@ -624,15 +680,16 @@ convention: ✅ shipped = on main · 🚧 in-flight = on an open branch/PR · �
   that from its own code), deciding whether/when to flip the exchange flag on
   too (cross-repo SSO ensemble, tracked in [`ROADMAP.md`](ROADMAP.md) §12), and
   the live SSO e2e. Cloudflare fronts prod.
-- ✅ **Casdoor MFA floor — gateway layer merged, ships dark (PR #40).** The
+- ✅ **Casdoor MFA floor — gateway layer merged, ships dark.** The
   gateway-side MFA primitives are on `main` but default-off: the `mfa_required`
   column on `gateway_route_access` (fail-closed), the `MFA_SATISFIED` authority
-  emitted by `CasdoorAuthorities` (from `amr`/`acr`), and the privileged-route
-  MFA floor in `GatewayRouteAccessFilter`. All three ship dark behind
-  `app.mfa.enabled` / `app.mfa.enforce-privileged-floor`. 🚧 **Still owed:**
-  the BFF-driven MFA challenge (stamps `mfa_satisfied` into the opaque session),
-  generalized step-up (sudo / SSH-via-UI / remote-install / superadmin ops), and
-  the remaining 9-PR plan — cross-repo, tracked in [`ROADMAP.md`](ROADMAP.md).
+  emitted by `CasdoorAuthorities` (from a fresh `mfa_satisfied_at` claim, not from
+  `amr`/`acr`), and the privileged-route MFA floor in `GatewayRouteAccessFilter`.
+  All three ship dark behind `app.mfa.enabled` / `app.mfa.enforce-privileged-floor`.
+  The BFF half is cross-repo and no longer only planned: admin-bff `main` reads the
+  claim and carries step-up gates (`DeviceTerminalStepUpGate`,
+  `BackingServiceStepUpGate`, changelog `150-mfa-substrate.xml`). Whether the
+  original 9-PR plan is complete was not checked; see [`ROADMAP.md`](ROADMAP.md).
 - ✅ **`X-Domain` brand header — strip is live, producer merged INERT (issue #4).**
   The gateway drops a client-supplied inbound `X-Domain` unconditionally, on every
   path and for every principal, so no downstream can be handed a forged brand. The
@@ -647,15 +704,21 @@ convention: ✅ shipped = on main · 🚧 in-flight = on an open branch/PR · �
   route-access decision, because anonymous requests — the ones the consumer scopes —
   short-circuit long before that decision. Flipping it changes no authorization
   decision here: `route_access` remains the enforcement surface.
-- 🔭 **Workload Console gating** (admin-bff work is 🚧 in-flight).
-  The federated pod-manage/log/exec admin-ui surfaces will need new gateway
+- 🔭 **Workload Console gating** (the admin-bff side is on its `main`: the
+  `workload/` package and changelog `110-workload-console-grants.xml`).
+  The federated pod-manage/log/exec admin-ui surfaces may need new gateway
   route-access rows / authority gates: superadmin cross-cluster, admins
   default-blind → superadmin-granted read-only own-domain (status-only / 24h /
-  log-opt-in grants; dangerous tiers default-off).
-- 🔭 **Tailnet superadmin-gateway posture** (Superadmin app-store infra legs are
-  🚧 in-flight). A TAILNET-ONLY gateway posture + federation registration so the
-  superadmin app-store remote is reachable over the tailnet and kept off the
-  public UI — implying tailnet-scoped route-access rows here. No gateway code yet.
+  log-opt-in grants; dangerous tiers default-off). This repo has no
+  workload-specific row. Whether the existing `/bff/admin/**` and
+  `/bff/superadmin/**` floors already cover it was not checked.
+- 🔭 **Tailnet superadmin-gateway posture.** A tailnet-only instance,
+  `hugmesh-superadmin-gateway`, is already defined in the cluster chart
+  (`hugmesh-generator`, `specs/cluster/apps/22-gateway-superadmin.yaml`): internal
+  ingress only, every route gated `ROLE_SUPERADMIN` by route-access rows under its
+  own name. This repo has no code for it. Its name ends in none of
+  `-pki-gateway`, `-be-gateway`, `-fe-gateway`, so with the datastores down it
+  falls back to the baked `/**` → `ROLE_ADMIN` floor.
 
 ## See also
 
