@@ -254,8 +254,9 @@ exchange OFF (see each bullet below for its flag's default):
   suspension/banned state, and a cached positive swap kept authorizing after a
   suspension. Fixed in two parts: admin-bff enforces suspension/ban fail-closed (403) at
   `/bff/internal/session/exchange`, and the gateway bounds the positive swap cache
-  (commit `cde7c79`: default TTL 60s → 5s; `cache-ttl-ms ≤ 0` disables the cache
-  entirely for a zero-staleness window). admin-bff additionally revokes the
+  (already in the 2026-07-29 initial public release: default TTL 5s, hard clamp 60s;
+  `cache-ttl-ms ≤ 0` disables the cache entirely for a zero-staleness window; commit
+  `cde7c79`, 2026-09-02, made the 60s ceiling configurable as `cache-ttl-max-ms`). admin-bff additionally revokes the
   `subject:<custody-sub>` key on role-revoke + suspension.
   **2026-09-16 (#2, operator decision "B: zero window now"):** the shipped default is
   now `cache-ttl-ms=0` — cache OFF, every `bff_` request round-trips to admin-bff; the
