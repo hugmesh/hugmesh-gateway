@@ -1,13 +1,13 @@
 # Multi-issuer security-slice — the reusable test pattern
 
-This is the **reference pattern** for proving a Spring WebFlux OAuth2 resource server
-correctly handles **per-brand (multi-issuer) Casdoor tokens**, with the security
-property that matters most: an **unknown issuer fails CLOSED (401)** and a token from
-one brand can **never authenticate as another**.
+This is the reference pattern for proving that a Spring WebFlux OAuth2 resource
+server handles **per-brand (multi-issuer) Casdoor tokens** correctly. Two properties
+matter most. An **unknown issuer fails CLOSED (401)**. A token from one brand can
+**never authenticate as another**.
 
 It was built first in `hugmesh-gateway`. Each of these
-[HugMesh](https://github.com/hugmesh) resource-server repos now carries its own
-copy of `TestIssuer`, `SecuritySliceSupport` and `MultiIssuerSecuritySliceTest`
+[HugMesh](https://github.com/hugmesh) resource-server repos now has its own copy of
+`TestIssuer`, `SecuritySliceSupport` and `MultiIssuerSecuritySliceTest`
 (`hugmesh-mod-bff-api` also has `Wave2` variants of the first two):
 
 > [`hugmesh-actions`](https://github.com/hugmesh/hugmesh-actions),
@@ -22,10 +22,10 @@ copy of `TestIssuer`, `SecuritySliceSupport` and `MultiIssuerSecuritySliceTest`
 
 Use the same pattern in any new resource-server repo.
 
-The whole point is **determinism with no network and no live Casdoor**: each brand's
-JWKS + OIDC discovery doc is served by a tiny in-process HTTP server bound to
-`127.0.0.1`, so `ReactiveJwtDecoders.fromIssuerLocation(...)` validates real
-RSA-signed tokens offline.
+The tests need **no network and no live Casdoor**. A small in-process HTTP server
+bound to `127.0.0.1` serves each brand's JWKS and OIDC discovery document, so
+`ReactiveJwtDecoders.fromIssuerLocation(...)` validates real RSA-signed tokens
+offline.
 
 ---
 
@@ -37,8 +37,8 @@ RSA-signed tokens offline.
 | (b) | A token from an issuer **not** in `app.tenancy.issuers` (well-formed, correctly signed, just unlisted) | the per-issuer resolver returns `Mono.empty()` → **401 fail-closed**, never a default-accept | CROSS-USER DENY |
 | (c) | A brand-Y JWT presented to the resource server | scoped to brand-Y; can **never** become brand-X (no `DOMAIN_brandx`) | CROSS-USER DENY |
 
-Plus the cheap fail-closed neighbours: a **tampered signature** and a **garbage
-bearer** both 401.
+Two cheap neighbours also fail closed: a **tampered signature** and a **garbage
+bearer** both give 401.
 
 ---
 
@@ -52,65 +52,64 @@ bearer** both 401.
 - starts a JDK `HttpServer` on `127.0.0.1:<random-port>` serving
   `/.well-known/openid-configuration` (issuer + `jwks_uri`) and
   `/.well-known/jwks.json` (the public JWK set);
-- exposes `issuerUri()` (the LHS of an `app.tenancy.issuers` pair) and
+- exposes `issuerUri()` (the left side of an `app.tenancy.issuers` pair) and
   `mint(subject, roleNames)` / `mintWithClaims(subject, claims)` /
   `mintExpired(subject, roleNames)`.
 
-A token minted by issuer A is cryptographically valid **only** against issuer A's
-manager — that is exactly the cross-brand isolation (c). `AutoCloseable`; stop it in
+A token minted by issuer A is valid **only** against issuer A's manager. That is the
+cross-brand isolation of scenario (c). `TestIssuer` is `AutoCloseable`; stop it in
 `@AfterEach`.
 
-Only dependency: `nimbus-jose-jwt`, already transitively on every resource-server's
-classpath via `spring-boot-starter-oauth2-resource-server`. Copy the file as-is.
+Its only dependency is `nimbus-jose-jwt`, which every resource server already gets
+through `spring-boot-starter-oauth2-resource-server`. Copy the file as it is.
 
 ### 2. `SecuritySliceSupport` — build the REAL `SecurityWebFilterChain` into a `WebTestClient`
 
-`src/test/java/.../config/SecuritySliceSupport.java`. It constructs the repo's real
+`src/test/java/.../config/SecuritySliceSupport.java`. It builds the repo's real
 `SecurityConfig.filterChain(ServerHttpSecurity.http())`, wraps it in a
 `WebFilterChainProxy`, and installs it as a `webFilter` on
-`WebTestClient.bindToController(...)`. **No full Spring Boot context** — the
-production `authorizeExchange` policy and OAuth2 resource-server wiring run exactly
-as deployed, but the test is a fast slice.
+`WebTestClient.bindToController(...)`. **No full Spring Boot context.** The
+production `authorizeExchange` policy and OAuth2 resource-server wiring run as
+deployed, in a fast slice.
 
-Helpers: `provider(resolver)` (take the multi-issuer swap) / `absent()` (single-issuer
-`o.jwt(...)` path).
+Helpers: `provider(resolver)` takes the multi-issuer swap; `absent()` takes the
+single-issuer `o.jwt(...)` path.
 
 ---
 
 ## How to replicate in another repo (checklist)
 
-1. **Copy** `TestIssuer.java` into that repo's `testsupport` package (no edits).
+1. **Copy** `TestIssuer.java` into that repo's `testsupport` package, unchanged.
 2. **Copy** `SecuritySliceSupport.java` and point it at *that* repo's `SecurityConfig`
-   constructor + `filterChain` signature. (If the repo's `SecurityConfig` takes
-   different constructor args — e.g. no `DomainRegistry` — adjust `sliceClient`.)
+   constructor and `filterChain` signature. If the constructor takes different
+   arguments (for example, no `DomainRegistry`), adjust `sliceClient`.
 3. **Write** `MultiIssuerSecuritySliceTest`:
-   - `@BeforeEach`: spin up `brandX`, `brandY`, and a `rogue` (untrusted) `TestIssuer`;
+   - `@BeforeEach`: start `brandX`, `brandY`, and a `rogue` (untrusted) `TestIssuer`;
    - build `DomainRegistry(brandX.issuerUri(), "<x>=brandx,<y>=brandy", "")` and assert
      `isMultiIssuer()`;
    - build the repo's multi-issuer resolver the way its tenancy config contributes it
      (`new TenancyResourceServerConfig(registry, "", "").tenantAuthManagerResolver()`);
    - `client = sliceClient(registry, provider(resolver), new AuthoritiesController())`;
-   - add an `AuthoritiesController` (`GET /whoami`) that echoes
+   - add an `AuthoritiesController` (`GET /whoami`) that echoes the
      `ReactiveSecurityContextHolder` authorities;
    - assert (a) `DOMAIN_brandx` + `ROLE_*`, (b) rogue → `isUnauthorized()`,
      (c) brand-Y → `DOMAIN_brandy` and NOT `DOMAIN_brandx`, plus tampered/garbage → 401.
-4. **Optionally** add a coarse path-gate slice (see
-   `SecurityConfigPathGateSliceTest` here) for that repo's own `authorizeExchange`
-   rules — the slice plumbing is identical; only the path/role table changes.
+4. **Optionally** add a coarse path-gate slice (see `SecurityConfigPathGateSliceTest`
+   here) for that repo's own `authorizeExchange` rules. The plumbing is the same;
+   only the path/role table changes.
 
-> If a repo does NOT have multi-issuer (`TenancyResourceServerConfig`) wiring yet, the
-> slice still applies once it does. Until then, copy the path-gate slice (single-issuer
-> `absent()` path with a single `TestIssuer`) so its `authorizeExchange` policy is at
-> least covered.
+> A repo without multi-issuer (`TenancyResourceServerConfig`) wiring can still copy the
+> path-gate slice (the single-issuer `absent()` path with one `TestIssuer`), so its
+> `authorizeExchange` policy is at least covered. Add the multi-issuer slice when the
+> wiring arrives.
 
 ---
 
 ## Why fail-closed is the load-bearing assertion
 
 The per-issuer resolver's allowlist is exactly `DomainRegistry.trustedIssuers()`. An
-`iss` outside that set yields **no** authentication manager, so the
-`JwtIssuerReactiveAuthenticationManagerResolver` surfaces a 401 **before any authority
-is emitted** — there is no fallback "default" manager that could accept an unlisted
-brand. Scenario (b) is the regression guard that keeps it that way: a future refactor
-that introduces a default-accept (or routes an unknown `iss` to brand-X's manager)
-turns (b) red.
+`iss` outside that set gets **no** authentication manager, so
+`JwtIssuerReactiveAuthenticationManagerResolver` returns 401 **before any authority is
+emitted**. No fallback "default" manager exists that could accept an unlisted brand.
+Scenario (b) keeps it that way: a refactor that adds a default-accept, or routes an
+unknown `iss` to brand-X's manager, turns (b) red.
