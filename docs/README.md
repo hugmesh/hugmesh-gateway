@@ -16,4 +16,4 @@ pages below go deeper.
 - [`testing/MULTI-ISSUER-SLICE.md`](testing/MULTI-ISSUER-SLICE.md) — the
   multi-issuer security-slice test pattern (`TestIssuer` and `SecuritySliceSupport`,
   under `src/test/.../testsupport` and `src/test/.../config`). It was built here
-  first; each of the nine other resource-server repos now has a copy.
+  first; ten other resource-server repos now have a copy.

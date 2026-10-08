@@ -11,6 +11,7 @@ It was built first in `hugmesh-gateway`. Each of these
 (`hugmesh-mod-bff-api` also has `Wave2` variants of the first two):
 
 > [`hugmesh-actions`](https://github.com/hugmesh/hugmesh-actions),
+> [`hugmesh-character-forge-bff-api`](https://github.com/hugmesh/hugmesh-character-forge-bff-api),
 > [`hugmesh-admin-bff-api`](https://github.com/hugmesh/hugmesh-admin-bff-api),
 > [`hugmesh-mod-bff-api`](https://github.com/hugmesh/hugmesh-mod-bff-api),
 > [`hugmesh-forum-bff-api`](https://github.com/hugmesh/hugmesh-forum-bff-api),
