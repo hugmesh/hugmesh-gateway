@@ -17,5 +17,5 @@ link out to.
 - [`testing/MULTI-ISSUER-SLICE.md`](testing/MULTI-ISSUER-SLICE.md) — the
   reusable multi-issuer security-slice test pattern (`TestIssuer` +
   `SecuritySliceSupport`, under `src/test/.../testsupport` and
-  `src/test/.../config`) built first in this repo and meant to be replicated
-  verbatim across the other HugMesh resource-server repos.
+  `src/test/.../config`) built first in this repo; each of the nine other
+  resource-server repos now carries a copy.

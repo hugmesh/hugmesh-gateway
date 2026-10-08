@@ -5,18 +5,22 @@ correctly handles **per-brand (multi-issuer) Casdoor tokens**, with the security
 property that matters most: an **unknown issuer fails CLOSED (401)** and a token from
 one brand can **never authenticate as another**.
 
-It was built first in `hugmesh-gateway`. Replicate it verbatim across the
-other [HugMesh](https://github.com/hugmesh) resource-server repos:
+It was built first in `hugmesh-gateway`. Each of these
+[HugMesh](https://github.com/hugmesh) resource-server repos now carries its own
+copy of `TestIssuer`, `SecuritySliceSupport` and `MultiIssuerSecuritySliceTest`
+(`hugmesh-mod-bff-api` also has `Wave2` variants of the first two):
 
 > [`hugmesh-actions`](https://github.com/hugmesh/hugmesh-actions),
-> [`hugmesh-admin-bff`](https://github.com/hugmesh/hugmesh-admin-bff),
-> [`hugmesh-mod-bff`](https://github.com/hugmesh/hugmesh-mod-bff),
-> [`hugmesh-forum-bff`](https://github.com/hugmesh/hugmesh-forum-bff),
-> [`hugmesh-wiki-bff`](https://github.com/hugmesh/hugmesh-wiki-bff),
-> [`hugmesh-owncast-bff`](https://github.com/hugmesh/hugmesh-owncast-bff),
-> [`hugmesh-tube-bff`](https://github.com/hugmesh/hugmesh-tube-bff),
-> [`hugmesh-user-bff`](https://github.com/hugmesh/hugmesh-user-bff),
+> [`hugmesh-admin-bff-api`](https://github.com/hugmesh/hugmesh-admin-bff-api),
+> [`hugmesh-mod-bff-api`](https://github.com/hugmesh/hugmesh-mod-bff-api),
+> [`hugmesh-forum-bff-api`](https://github.com/hugmesh/hugmesh-forum-bff-api),
+> [`hugmesh-wiki-bff-api`](https://github.com/hugmesh/hugmesh-wiki-bff-api),
+> [`hugmesh-owncast-bff-api`](https://github.com/hugmesh/hugmesh-owncast-bff-api),
+> [`hugmesh-tube-bff-api`](https://github.com/hugmesh/hugmesh-tube-bff-api),
+> [`hugmesh-user-bff-api`](https://github.com/hugmesh/hugmesh-user-bff-api),
 > [`hugmesh-federation-api`](https://github.com/hugmesh/hugmesh-federation-api).
+
+Use the same pattern in any new resource-server repo.
 
 The whole point is **determinism with no network and no live Casdoor**: each brand's
 JWKS + OIDC discovery doc is served by a tiny in-process HTTP server bound to
@@ -49,7 +53,8 @@ bearer** both 401.
   `/.well-known/openid-configuration` (issuer + `jwks_uri`) and
   `/.well-known/jwks.json` (the public JWK set);
 - exposes `issuerUri()` (the LHS of an `app.tenancy.issuers` pair) and
-  `mint(subject, roleNames)` / `mintWithClaims(subject, claims)`.
+  `mint(subject, roleNames)` / `mintWithClaims(subject, claims)` /
+  `mintExpired(subject, roleNames)`.
 
 A token minted by issuer A is cryptographically valid **only** against issuer A's
 manager — that is exactly the cross-brand isolation (c). `AutoCloseable`; stop it in
