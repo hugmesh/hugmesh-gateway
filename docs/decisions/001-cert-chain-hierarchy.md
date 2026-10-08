@@ -78,14 +78,19 @@ repo (the gateway is the natural home — it's the first thing every
 external request hits and the canonical TLS terminator for the
 platform). The script:
 
-1. Reads the hugmesh.net intermediate (`--root-ca` flag).
-2. Generates a new per-stack/per-brand intermediate signed by that root.
+1. Reads the hugmesh.net root certificate and key (`--root-ca`, `--root-key`).
+2. Generates one new per-stack/per-brand intermediate (named by `--stack`) signed by that root.
 3. Mints leaf certs (server + mTLS client) signed by the intermediate.
 4. Emits a single `fullchain.pem` (leaf + intermediate, root excluded
    per RFC 5246 — TLS clients should trust the root, not get it from
    the server).
 5. Emits a `truststore.p12` containing the root + intermediate for
    Java services that need both.
+
+The script runs `openssl` and `keytool` inside short-lived Docker containers
+(`alpine:3.20`, `eclipse-temurin:21-jre`), so the host needs only Docker. It
+skips generation when `intermediate.crt` and `truststore.p12` already exist in
+the output directory.
 
 A consuming stack's existing `scripts/gen-certs.sh` is
 updated in a follow-up PR (see below) to call this script when
@@ -119,3 +124,13 @@ the existing self-signed flow otherwise.
   cadence.
 - **All Spring services** — switch truststore generation to consume
   the shared bundle instead of importing one CA per stack.
+
+## Status (checked 2026-10-07)
+
+The builder script exists. The first follow-up does not: a search of `origin/main`
+in every local `hugmesh-*` checkout for `CERT_CHAIN_MODE`, `chain-from` and
+`HUGMESH_SYSTEMS_INTERMEDIATE_PATH` finds this file alone. The dev/e2e script that
+exists is `tests/stack/gen-certs.sh` in `hugmesh-generator`. It makes one
+self-signed CA and has no chained mode. This repo has no `scripts/gen-certs.sh`.
+The other two follow-ups (the signed-intermediate release pipeline and the shared
+truststore) were not checked.
