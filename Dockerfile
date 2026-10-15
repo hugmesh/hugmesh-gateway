@@ -3,8 +3,15 @@
 # Stage 1: build the fat jar with Maven on a JDK image.
 # Stage 2: copy the jar onto a slim JRE base so the runtime image
 # stays under ~200 MB.
+#
+# Both base images are pinned by the digest of the multi-arch image index, so a rebuild
+# pulls the bytes that were reviewed instead of whatever the tag points at today. The tag
+# stays in front of the digest for readability. To move to a newer base, resolve the new
+# index digest of each tag (docker buildx imagetools inspect eclipse-temurin:25-jdk) and
+# edit both FROM lines. DockerfileBaseImageDigestGuardTest fails the build on a FROM that
+# names an image without a digest.
 
-FROM eclipse-temurin:25-jdk AS build
+FROM eclipse-temurin:25-jdk@sha256:63f965b560b905c9633218330ac3516304b526a74fdc323a504b05c06e712c30 AS build
 WORKDIR /work
 COPY mvnw mvnw.cmd ./
 COPY .mvn .mvn
@@ -34,7 +41,7 @@ RUN --mount=type=secret,id=packages_read_token \
       fi; \
       ./mvnw -B package -DskipTests'
 
-FROM eclipse-temurin:25-jre
+FROM eclipse-temurin:25-jre@sha256:fd4b1c02c64eef378212e23656fc0b0caa41a357876fa0b60e51ceda94a3db64
 # curl is required by this image's docker-compose HEALTHCHECK (actuator/health/readiness);
 # eclipse-temurin's jre base does not ship it, which silently breaks every
 # `depends_on: condition: service_healthy` gate on a fresh compose boot.

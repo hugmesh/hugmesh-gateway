@@ -114,16 +114,25 @@ cross-repo items list the target repo(s).
 - **Acceptance**: integration tests stub GitHub's `/user/repos` + `/user/orgs`
   and assert the grant fires (see that repo's test suite).
 
-### 7. Banned-user remote module 🔭
+### 7. Banned-user landing ✅ (shipped as the login-ui appeal flow)
 
-- **Repo**: the platform front-end (`/_remotes/banned/**`).
-- **Work**: when the gateway denies a revoked/banned principal, the host shell
-  routes to this remote — a "contact a mod/admin" page pre-filling the user's
-  Casdoor id + revocation key. SecurityConfig **already (✅ shipped)** permits
-  `/_remotes/banned/**` for unauthenticated traffic so a logged-out banned user
-  can still read it.
-- **Acceptance**: BDD scenario — log in → admin posts a revocation → user's
-  next request lands on `/banned` with the right copy.
+- **Repos**: `hugmesh-login-ui` (the `/login/appeal` page), `hugmesh-admin-bff-api`
+  (the account-appeal records).
+- **Shipped**: the planned `/_remotes/banned` remote was replaced by an appeal
+  flow. `hugmesh-login-ui` classifies a rejected sign-in (`account_banned` /
+  `account_suspended`) in `src/app/bff.service.ts` and auto-routes the visitor to
+  `/login/appeal` (`src/app/appeal.component.ts`), which shows the anonymous
+  appeal-contact address and lets a still-signed-in curtailed account file a
+  structured appeal. `hugmesh-admin-bff-api` stores those appeals
+  (changelog `250-account-appeals.xml`, `AccountAppeal*` controllers).
+- **Gateway side**: the anonymous `GET /bff/public/appeal-contact` path is in
+  `SecurityConfig` `PUBLIC_PATHS`. `/_remotes/banned/**` is **still** in
+  `PUBLIC_PATHS` (and in `BffSessionProperties` / `application.yml`), but the
+  appeal flow does not go through it. 🔭 **Still open**: decide whether that
+  permit is dead surface to remove, or document why it is kept.
+- **Acceptance**: `hugmesh-login-ui` `e2e/features/auth/login-blocked.feature`
+  covers a blocked sign-in landing on the appeal page, and
+  `e2e/features/auth/appeal-submit.feature` covers the structured submit.
 
 ### 8. Mod/admin contact-registration remote + contact DB 🔭
 
@@ -316,6 +325,6 @@ model — tracked so the gateway-side work isn't lost. None are shipped here.
 The foundation pieces (Casdoor JWT, Cassandra revocation cache, URL registry,
 External-Authorization header, route-access + domain scoping) are the **shared
 dependency** every downstream item leans on, and are now shipped. The remaining
-items either consume one of these directly (the registration/banned remotes,
+items either consume one of these directly (the registration remote,
 the actions service) or extend the same pattern in another repo — so each
 follow-up PR stays small and reviewable instead of one mega-PR across repos.
