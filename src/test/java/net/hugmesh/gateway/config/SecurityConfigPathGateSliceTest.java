@@ -12,6 +12,7 @@ import reactor.core.publisher.Mono;
 import net.hugmesh.gateway.security.DomainRegistry;
 import net.hugmesh.gateway.testsupport.TestIssuer;
 
+import java.net.URI;
 import java.util.List;
 
 /**
@@ -53,6 +54,14 @@ class SecurityConfigPathGateSliceTest extends SecuritySliceSupport {
         ReactiveAuthenticationManagerResolver<ServerWebExchange> resolver =
                 tenancy.tenantAuthManagerResolver();
         client = sliceClient(registry, provider(resolver), new ProbeController());
+    }
+
+    private WebTestClient feClient() {
+        String issuersCsv = issuer.issuerUri() + "=brandx," + issuer2.issuerUri() + "=brandy";
+        DomainRegistry registry = new DomainRegistry(issuer.issuerUri(), issuersCsv, "");
+        TenancyResourceServerConfig tenancy = new TenancyResourceServerConfig(registry, "", "");
+        return sliceClient("hugmesh-fe-gateway", registry,
+                provider(tenancy.tenantAuthManagerResolver()), new ProbeController());
     }
 
     @AfterEach
@@ -152,6 +161,71 @@ class SecurityConfigPathGateSliceTest extends SecuritySliceSupport {
         }
     }
 
+    @Test
+    void anonymous_allowedOn_loginAndRegistrationRemotes() {
+        // The two federated UI shells that DO exist stay anonymous-reachable (they
+        // are the pre-auth sign-in / sign-up pages). Pins that dropping the dead
+        // /_remotes/banned/** permit did not touch its live siblings.
+        for (String path : List.of(
+                "/_remotes/login/remoteEntry.json",
+                "/_remotes/registration/remoteEntry.json")) {
+            client.get().uri(path).exchange()
+                    .expectStatus().value(s -> assertNot401Nor403(path, s));
+        }
+    }
+
+    @Test
+    void anonymous_deniedOn_bannedRemote_everySpelling() {
+        // No remote is served at /_remotes/banned (the banned-user flow is the
+        // login-ui /login/appeal page, reached through /bff/public/appeal-contact),
+        // so the path must not be an anonymous permit. RAW URIs, so the encoded,
+        // dot-segment, case, trailing-slash and ;param spellings reach the matcher
+        // exactly as a client would send them.
+        for (String raw : List.of(
+                "/_remotes/banned/x",
+                "/_remotes/banned/remoteEntry.json",
+                "/_remotes/banned/",
+                "/_remotes/banned",
+                "/_remotes/BANNED/x",
+                "/_remotes/%62anned/x",
+                "/_remotes/banned%2Fx",
+                "/_remotes/%2562anned/x",
+                "/_remotes/banned/./x",
+                "/_remotes/login/../banned/x",
+                "/_remotes/banned;a=b/x",
+                "/_remotes/banned/x;a=b")) {
+            client.get().uri(URI.create(raw)).exchange()
+                    .expectStatus().value(status -> assertDeniedNotServed(raw, status));
+        }
+    }
+
+    /** Anonymous must be refused: 401 from the authenticated() floor, or 400 where
+     *  the server rejects the malformed spelling (an encoded slash) before routing.
+     *  Anything else — above all 200 — means the path was served. */
+    private static void assertDeniedNotServed(String raw, int status) {
+        if (status != 401 && status != 400) {
+            throw new AssertionError("expected anonymous DENY (401, or 400 for a malformed "
+                    + "spelling) on " + raw + " but got " + status);
+        }
+    }
+
+    @Test
+    void feTier_deniedOn_bannedRemote() {
+        // The fe front door adds anonymous SPA-shell permits on top of PUBLIC_PATHS;
+        // none of them may cover the banned remote.
+        WebTestClient fe = feClient();
+        fe.get().uri("/_remotes/banned/remoteEntry.json").exchange()
+                .expectStatus().isUnauthorized();
+    }
+
+    @Test
+    void bannedRemote_authenticatedCallerNotBlockedByCoarseFloor() {
+        // The floor is authenticated(), not a blanket deny: a signed-in user is let
+        // through the coarse layer (route-access, a later layer, still governs).
+        as(List.of("user"), "/_remotes/banned/remoteEntry.json").exchange()
+                .expectStatus().isOk();
+    }
+
     // ── ANONYMOUS DENY — the authenticated() floor ────────────────────────────
 
     @Test
@@ -182,6 +256,7 @@ class SecurityConfigPathGateSliceTest extends SecuritySliceSupport {
     @RestController
     static class ProbeController {
         @RequestMapping({
+                "/_remotes/**",
                 "/actuator/health", "/actuator/metrics", "/actuator/info",
                 "/api/admin/cluster/nodes", "/api/admin/cassandra/keyspaces",
                 "/api/reports/q3",

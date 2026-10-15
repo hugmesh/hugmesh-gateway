@@ -178,7 +178,7 @@ issuer-keyed `domainOf(jwt, registry)`.
 The resource-server `SecurityWebFilterChain` applies the coarse, role-only floor:
 
 - **Public** (`permitAll`): `/api/auth/**`, `/api/registration/**`, `/api/login/**`,
-  the `/_remotes/{login,registration,banned}/**` federated UI shells, and
+  the `/_remotes/{login,registration}/**` federated UI shells, and
   `/bff/public/announcements/**` (the unauthenticated pre-auth login banners).
 - **Homeserver passthrough** (`permitAll` at the OAuth2 layer): `/_matrix/**`,
   `/api/v1/**`, `/api/v2/**`, `/oauth/**`, `/.well-known/**` — these carry an

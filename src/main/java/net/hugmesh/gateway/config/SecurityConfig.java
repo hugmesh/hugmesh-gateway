@@ -341,15 +341,17 @@ public class SecurityConfig {
         return applicationName != null && applicationName.endsWith("-fe-gateway");
     }
 
-    /** Paths that anonymous traffic must reach (login, registration,
-     *  banned-user page). Aligned with the front-end remote modules. */
+    /** Paths that anonymous traffic must reach (login, registration).
+     *  Aligned with the front-end remote modules that exist. There is deliberately
+     *  NO {@code /_remotes/banned/**}: no remote is served there (the banned-user
+     *  flow is the login-ui appeal page, fed by {@code /bff/public/appeal-contact}),
+     *  so a permit would silently expose anything later mounted at that prefix. */
     private static final String[] PUBLIC_PATHS = {
             "/api/auth/**",
             "/api/registration/**",
             "/api/login/**",
             "/_remotes/login/**",
             "/_remotes/registration/**",
-            "/_remotes/banned/**",
             // Public login-page announcements: the admin-bff exposes
             // GET /bff/public/announcements/login UNAUTHENTICATED so the
             // pre-auth LOGIN page can render published login-target banners.
