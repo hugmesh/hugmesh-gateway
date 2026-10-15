@@ -1,7 +1,10 @@
 package net.hugmesh.gateway.filter;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
 import org.springframework.mock.http.server.reactive.MockServerHttpRequest;
 import org.springframework.mock.web.server.MockServerWebExchange;
@@ -11,6 +14,7 @@ import reactor.test.StepVerifier;
 import net.hugmesh.gateway.cache.RevocationListService;
 import net.hugmesh.gateway.cache.RevocationListService.HsToken;
 
+import java.net.URI;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Set;
@@ -186,5 +190,177 @@ class HomeserverTokenRevocationFilterTest {
         var chain = new RecordingChain();
         StepVerifier.create(filter.filter(ex, chain)).verifyComplete();
         assertThat(chain.forwarded).isTrue();
+    }
+
+    // ── the path the gate reads is the path the router and homeserver read ────
+
+    /** Like {@link #exchange} but the path is taken VERBATIM (no template encoding). */
+    private MockServerWebExchange rawExchange(String rawPath, String bearer) {
+        MockServerHttpRequest.BaseBuilder<?> b =
+                MockServerHttpRequest.method(HttpMethod.GET, URI.create("http://gw" + rawPath));
+        if (bearer != null) b.header(HttpHeaders.AUTHORIZATION, "Bearer " + bearer);
+        return MockServerWebExchange.from(b.build());
+    }
+
+    private HomeserverTokenRevocationFilter bannedAlice() {
+        var svc = revocations(Set.of("hs:matrix:alice", "hs:mastodon:alice"),
+                Map.of(hash("banned"), new HsToken("alice", "matrix", "brokered", "dev1"),
+                        hash("banned-masto"), new HsToken("alice", "mastodon", "brokered", "app1"),
+                        hash("good"), new HsToken("bob", "matrix", "brokered", "dev9")));
+        return new HomeserverTokenRevocationFilter(svc, true);
+    }
+
+    private void assertDenied(HomeserverTokenRevocationFilter filter, String rawPath, String bearer) {
+        var ex = rawExchange(rawPath, bearer);
+        var chain = new RecordingChain();
+        StepVerifier.create(filter.filter(ex, chain)).verifyComplete();
+        assertThat(chain.forwarded).as("%s must not be forwarded", rawPath).isFalse();
+        assertThat(ex.getResponse().getStatusCode()).as(rawPath).isEqualTo(HttpStatus.FORBIDDEN);
+    }
+
+    private void assertForwarded(HomeserverTokenRevocationFilter filter, String rawPath, String bearer) {
+        var ex = rawExchange(rawPath, bearer);
+        var chain = new RecordingChain();
+        StepVerifier.create(filter.filter(ex, chain)).verifyComplete();
+        assertThat(chain.forwarded).as("%s must be forwarded", rawPath).isTrue();
+        assertThat(ex.getResponse().getStatusCode()).as(rawPath).isNull();
+    }
+
+    @Test
+    void bannedToken_encodedSegmentBelowTheGatedPrefix_isDeniedLikeThePlainPath() {
+        // Regression pin, NOT a bypass: the prefix /_matrix is spelled literally here,
+        // so even the raw-path gate already denied this. The bypasses are the
+        // spellings that alter the prefix itself, in the parameterised tests below.
+        var filter = bannedAlice();
+        // the plain spelling is the control: same 403
+        assertDenied(filter, "/_matrix/client/v3/sync", "banned");
+        // %76 is "v": the router decodes it, so this is /_matrix/client/vr0/sync
+        assertDenied(filter, "/_matrix/client/%76r0/sync", "banned");
+        assertDenied(filter, "/_matrix/client/%76%33/sync", "banned");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            // percent-encoding of the prefix itself, upper and lower case hex
+            "/%5Fmatrix/client/v3/sync",
+            "/%5fmatrix/client/v3/sync",
+            "/_%6Datrix/client/v3/sync",
+            "/%5F%6d%61trix/client/v3/sync",
+            // encoded slash inside the prefix
+            "/_matrix%2Fclient/v3/sync",
+            // double and triple encoding
+            "/%255Fmatrix/client/v3/sync",
+            "/%25255Fmatrix/client/v3/sync",
+            "/_matrix/client/%2576%33/sync",
+            // letter case
+            "/_MATRIX/client/v3/sync",
+            "/_Matrix/Client/V3/Sync",
+            // trailing slash, doubled slash, leading doubled slash
+            "/_matrix/client/v3/sync/",
+            "//_matrix/client/v3/sync",
+            "/_matrix//client//v3/sync",
+            // dot segments, plain and encoded
+            "/./_matrix/client/v3/sync",
+            "/x/../_matrix/client/v3/sync",
+            "/x/%2e%2e/_matrix/client/v3/sync",
+            "/x/%2E%2E/_matrix/client/v3/sync",
+            "/x/.%2e/_matrix/client/v3/sync",
+            "/%252e/_matrix/client/v3/sync",
+            "/_matrix/client/v3/../v3/sync",
+            // path parameters, plain and encoded semicolon
+            "/_matrix;a=b/client/v3/sync",
+            "/_matrix/client;x/v3/sync",
+            "/_matrix%3Bx=y/client/v3/sync",
+            // backslash read as a separator (a raw backslash is not a legal URI character)
+            "/_matrix%5Cclient/v3/sync",
+            // leaving the discovery exemption by a dot segment
+            "/.well-known/../_matrix/client/v3/sync",
+            "/.well-known/%2e%2e/_matrix/client/v3/sync",
+            // not the exact discovery path
+            "/_matrix/client/%76ersions",
+            "/_matrix/client/versions/",
+            "/_matrix/client/versions/../v3/sync",
+    })
+    void bannedToken_everySpellingOfAMatrixPath_isDenied(String rawPath) {
+        assertDenied(bannedAlice(), rawPath, "banned");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "/%61pi/v1/timelines/home",
+            "/api/%76%31/timelines/home",
+            "/API/V1/timelines/home",
+            "/api;x=1/v1/timelines/home",
+            "/api/v2/%73earch",
+            "/%6Fauth/token",
+            "/x/%2e%2e/api/v1/timelines/home",
+    })
+    void bannedToken_everySpellingOfAMastodonPath_isDenied(String rawPath) {
+        assertDenied(bannedAlice(), rawPath, "banned-masto");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "/_matrix/client/%76r0/sync",
+            "/%5Fmatrix/client/v3/sync",
+            "/api/%76%31/timelines/home",
+            "/x/%2e%2e/_matrix/client/v3/sync",
+    })
+    void unrecognisedBearer_onAnEncodedGatedPath_failsClosed(String rawPath) {
+        assertDenied(bannedAlice(), rawPath, "never-minted");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            // no single reading: encoded NUL, deeper nesting than is followed
+            "/_matrix/client/v3/sync%00",
+            "/_matrix/client/v3/%00/sync",
+            "/%2525252575/anything",
+            "/_matrix/client/v3/%ff%fe/sync",
+    })
+    void ambiguousPath_withAKnownGoodBearer_isRefused(String rawPath) {
+        assertDenied(bannedAlice(), rawPath, "good");
+    }
+
+    @Test
+    void ambiguousPath_withoutBearer_isLeftToTheCoarseGate() {
+        assertForwarded(bannedAlice(), "/_matrix/client/v3/sync%00", null);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "/_matrix/client/v3/sync",
+            // legitimate encoded ids: a room id and a base64 event id with an encoded slash
+            "/_matrix/client/v3/rooms/%21abc%3Aexample.org/send/m.room.message/txn1",
+            "/_matrix/client/v3/rooms/%21abc%3Aexample.org/event/%24ab%2Fcd%2Bef",
+            "/api/v1/accounts/lookup",
+    })
+    void goodToken_onLegitimateEncodedPaths_isForwarded(String rawPath) {
+        assertForwarded(bannedAlice(), rawPath, "good");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "/api/g%61mes/list",
+            "/api/games/%2e%2e/foo",
+            "/api;x=1/games/list",
+            "/_matrixfoo/x",
+            "/apix/v1/timelines/home",
+            // ambiguous but not under a gated prefix, and not nested too deep: not this filter's surface
+            "/api/games/list%00",
+    })
+    void ungatedPaths_areNotCaughtByTheWiderMatching(String rawPath) {
+        // an unrecognised bearer on an ungated path is not this filter's concern
+        assertForwarded(bannedAlice(), rawPath, "never-minted");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "/_matrix/client/versions",
+            "/.well-known/matrix/client",
+            "/.well-known/matrix/server",
+    })
+    void discoveryPaths_stayExemptInTheirPlainSpelling(String rawPath) {
+        assertForwarded(bannedAlice(), rawPath, "never-minted");
     }
 }

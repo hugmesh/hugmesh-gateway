@@ -7,7 +7,6 @@ import org.springframework.core.Ordered;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Component;
-import org.springframework.util.AntPathMatcher;
 import org.springframework.web.server.ServerWebExchange;
 import org.springframework.web.server.WebFilter;
 import org.springframework.web.server.WebFilterChain;
@@ -68,7 +67,6 @@ import java.util.HexFormat;
 public class HomeserverTokenRevocationFilter implements WebFilter, Ordered {
 
     private static final Logger log = LoggerFactory.getLogger(HomeserverTokenRevocationFilter.class);
-    private static final AntPathMatcher MATCHER = new AntPathMatcher();
 
     /** The token-bearing homeserver surfaces this filter adjudicates. */
     private static final String[] GATED_PATHS = {
@@ -108,7 +106,17 @@ public class HomeserverTokenRevocationFilter implements WebFilter, Ordered {
         if (!enabled) return chain.filter(exchange);
 
         String path = exchange.getRequest().getPath().value();
-        if (!isGated(path) || isDiscoveryExempt(path)) {
+        // Decide on every spelling a downstream hop could read, not the raw string
+        // alone: the router and the homeserver decode the path, so an encoded,
+        // dotted, parameterised or re-cased variant of a gated prefix is the same
+        // request. See RequestPathForms.
+        RequestPathForms forms = RequestPathForms.of(path);
+        boolean ambiguous = forms.isAmbiguous();
+        // A path nested too deep to read cannot be shown to be OUTSIDE the gated
+        // surface, so it is adjudicated like a gated one. Any other ambiguity
+        // (encoded NUL, bad UTF-8, malformed escape) only matters on a gated path.
+        boolean adjudicate = isGated(forms) || forms.isNestedTooDeep();
+        if (!adjudicate || (!ambiguous && isDiscoveryExempt(forms))) {
             return chain.filter(exchange);
         }
 
@@ -118,6 +126,13 @@ public class HomeserverTokenRevocationFilter implements WebFilter, Ordered {
             // coarse SecurityConfig gate + route-access layer already decide
             // whether an anonymous request may reach this path.
             return chain.filter(exchange);
+        }
+
+        if (ambiguous) {
+            // FAIL-CLOSED: a path with no single reading (malformed escape, encoded
+            // NUL, non-UTF-8 bytes, nesting deeper than we follow) cannot be proven
+            // to be outside the gated surface, so a presented bearer is refused.
+            return reject(exchange, path, "ambiguous-path");
         }
 
         String hash = sha256(bearer);
@@ -162,14 +177,14 @@ public class HomeserverTokenRevocationFilter implements WebFilter, Ordered {
         return null;
     }
 
-    private boolean isGated(String path) {
-        for (String p : GATED_PATHS) if (MATCHER.match(p, path)) return true;
-        return false;
+    /** Gated if ANY spelling of the path is under a gated prefix (case-insensitive). */
+    private boolean isGated(RequestPathForms forms) {
+        return forms.anyMatches(GATED_PATHS);
     }
 
-    private boolean isDiscoveryExempt(String path) {
-        for (String p : DISCOVERY_EXEMPT) if (MATCHER.match(p, path)) return true;
-        return false;
+    /** Exempt only if EVERY spelling is a discovery path (case-sensitive). */
+    private boolean isDiscoveryExempt(RequestPathForms forms) {
+        return forms.allMatch(DISCOVERY_EXEMPT);
     }
 
     private static String bearerOf(ServerWebExchange exchange) {
