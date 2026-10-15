@@ -14,7 +14,9 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  *
  * <p>Defaults match the chart's {@code /stores} layout so a stock in-cluster pod
  * needs no extra config beyond {@code hugmesh.gateway.mtls.enabled=true}; the
- * passwords default empty (a passwordless PKCS12 still loads).
+ * passwords default empty (a passwordless PKCS12 still loads — held in place by
+ * {@code DownstreamMtlsConfigTest#enabledWithPasswordlessStores_andEmptyPasswords_stillStarts},
+ * which is why an empty password is diagnosed on a FAILED open rather than refused up front).
  *
  * <p><b>Why the emitted file is a plain {@code application.properties}, not the
  * profile-named {@code application-tls.properties} it once was</b>
@@ -31,9 +33,21 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  * needs no profile, and shares no keys with the {@code /config/} route table, so it
  * shadows nothing. Re-verified against the chart's
  * {@code charts/hugmesh-gateway/templates/deployment.yaml} ({@code FILENAME IS
- * LOAD-BEARING} block) on 2026-09-09. A live in-cluster boot with mTLS ON is still not
- * on record; the fail-fast in {@link DownstreamMtlsConfig#load} remains the backstop
- * (a wrong password is a crash-loop, never a silent plaintext downgrade).
+ * LOAD-BEARING} block) on 2026-09-09, and again on 2026-09-24 together with the gateway
+ * Applications: every one that sets {@code HUGMESH_GATEWAY_MTLS_ENABLED=true} (be, fe,
+ * superadmin) also sets {@code keystore.enabled: true} — the switch that adds
+ * {@code file:/stores/} to {@code SPRING_CONFIG_ADDITIONAL_LOCATION} — and none overrides
+ * that variable or {@code SPRING_PROFILES_ACTIVE}. The Spring side of that mechanism (plain
+ * file loads under {@code routes} alone and overrides the packaged empty fallback; the old
+ * profile-named file does not) is now executed, on this repo's Boot version and packaged
+ * {@code application.yml}, by {@code DownstreamMtlsStoresFileLoadingTest}.
+ *
+ * <p>A live in-cluster boot with mTLS ON is still not on record. The backstop is the
+ * fail-fast in {@link DownstreamMtlsConfig}'s store loading, now under test
+ * ({@code DownstreamMtlsConfigTest}): an empty or wrong password is a crash-loop, never a
+ * silent plaintext downgrade, and the startup error names the store, the exact
+ * {@code hugmesh.tls.*-password} key, and — when that key is empty — the unloaded
+ * {@code /stores/application.properties} as the usual cause.
  */
 @ConfigurationProperties(prefix = "hugmesh.tls")
 public class DownstreamMtlsProperties {

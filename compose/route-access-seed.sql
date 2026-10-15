@@ -35,18 +35,16 @@ INSERT INTO gateway_route_access (gateway, url_pattern, role, allow) VALUES
   ('hugmesh-pki-gateway',  '/api/auth/**',          'ROLE_USER',  true),
   ('hugmesh-pki-gateway',  '/login/**',             'PUBLIC',     true),
   ('hugmesh-pki-gateway',  '/.well-known/**',       'PUBLIC',     true),
-  -- SUPERADMIN floor for the headscale control plane (bug #15). The pki gateway
-  -- also fronts the cross-domain headscale control plane on its own Host
-  -- (application-pki.yml: the `headscale` route matches Host=scale.hugmesh.net
-  -- with NO Path predicate, so its paths are NOT covered by the three rows above).
-  -- Without a row those paths were NO_RULE and any authenticated same-domain
-  -- ROLE_USER reached the superadmin-tier control plane. The /** catch-all is the
-  -- correct anchor; longest-pattern-match keeps the three rows above intact for
-  -- their own paths while everything else (headscale) floors to SUPERADMIN. MUST be
-  -- ROLE_SUPERADMIN, NOT ROLE_ADMIN — only SUPERADMIN crosses domains to the infra
-  -- control plane. Mirrors the canonical CanonicalSeed.pki() fallback + the
-  -- be-gateway `/bff/superadmin/** -> ROLE_SUPERADMIN` precedent.
-  ('hugmesh-pki-gateway',  '/**',                   'ROLE_SUPERADMIN', true),
+  -- NO bare '/**' row for the pki gateway (decision 79 = B,
+  -- hugmesh-admin-bff-api#57, 2026-09-23). The headscale control plane (the
+  -- `headscale` route in hugmesh-pki-gateway application-pki.yml, Host=scale.<domain>
+  -- with NO Path predicate) used to be floored here by a '/**' -> ROLE_SUPERADMIN
+  -- row (bug #15). It could not stop a same-brand ROLE_ADMIN / ROLE_GAME-MASTER
+  -- (GatewayRouteAccessFilter forwards both in their own domain before any row is
+  -- read), and the admin API can never recreate a '/**' row. The gateway's
+  -- SecurityConfig now requires ROLE_SUPERADMIN for EVERY request on that route's
+  -- Host, ahead of PUBLIC_PATHS, so no row is needed here. Mirrors
+  -- CanonicalSeed.pki().
   -- be-gateway (matrix/mastodon/api.hugmesh.net)
   -- Homeserver surfaces are gated by the PLATFORM roles (account-states
   -- ban/congruence), NOT the broad ROLE_USER floor: a ban removes ROLE_MATRIX /
@@ -136,7 +134,31 @@ INSERT INTO gateway_route_access (gateway, url_pattern, role, allow) VALUES
   ('hugmesh-be-gateway',   '/v1/synthesize/**',     'ROLE_USER',     true),  -- edge-ai-tts voice synthesis API
   ('hugmesh-be-gateway',   '/v1/**',                'ROLE_USER',     true),  -- edge-ai OpenAI-compatible inference API
   -- fe-gateway (hugmesh.net host + MFE + /bff proxy)
+  -- FULL PARITY with CanonicalSeed.fe() (issue #34): this INSERT must carry every
+  -- row that method returns, in the same order, so
+  -- composeSeed_feGateway_wholeBlockMatchesTheBakedCanonicalSeedExactly
+  -- (GatewayRouteAccessServiceTest) enumerates them and fails on any future
+  -- drift instead of trusting a hand-list.
   ('hugmesh-fe-gateway',   '/',                     'PUBLIC',        true),
+  -- The rest of the anonymous SPA shell the '/' row already implies: the document,
+  -- the root-level hashed bundles, the module-federation manifests, favicon and
+  -- static assets. Mirrors SecurityConfig's FE_SHELL_PUBLIC_GET_PATHS floor
+  -- (GET-only, fe tier only) so the coarse layer and this table agree.
+  ('hugmesh-fe-gateway',   '/index.html',           'PUBLIC',        true),
+  ('hugmesh-fe-gateway',   '/favicon.ico',          'PUBLIC',        true),
+  ('hugmesh-fe-gateway',   '/importmap.json',       'PUBLIC',        true),
+  ('hugmesh-fe-gateway',   '/remoteEntry.json',     'PUBLIC',        true),
+  ('hugmesh-fe-gateway',   '/*.js',                 'PUBLIC',        true),
+  ('hugmesh-fe-gateway',   '/*.css',                'PUBLIC',        true),
+  ('hugmesh-fe-gateway',   '/assets/**',            'PUBLIC',        true),
+  -- Public federation reads (federation-api permitAll's both app-side): the
+  -- vanity profile resolve and the install-state capabilities projection a
+  -- LOGGED-OUT host shell reads. Scoped to the exact public reads (NOT
+  -- /api/federation/**) — the manifest / module-registry / username surfaces stay
+  -- gated.
+  ('hugmesh-fe-gateway',   '/api/federation/vanity',       'PUBLIC', true),
+  ('hugmesh-fe-gateway',   '/api/federation/vanity/**',    'PUBLIC', true),
+  ('hugmesh-fe-gateway',   '/api/federation/capabilities', 'PUBLIC', true),
   -- Social SPA shells congruent with the be platform gates.
   ('hugmesh-fe-gateway',   '/social/matrix/**',     'ROLE_MATRIX',   true),
   ('hugmesh-fe-gateway',   '/social/matrix/**',     'ROLE_MOD',      true),
@@ -155,7 +177,40 @@ INSERT INTO gateway_route_access (gateway, url_pattern, role, allow) VALUES
   ('hugmesh-fe-gateway',   '/bff/register/**',      'ROLE_USER',  true),
   ('hugmesh-fe-gateway',   '/bff/provision/**',     'ROLE_USER',  true),
   ('hugmesh-fe-gateway',   '/bff/me/**',            'ROLE_USER',  true),
+  -- Public login-page announcements / appeal-contact resolver. admin-bff serves
+  -- both UNAUTHENTICATED (permitAll, no PII); the pre-auth login-ui reads them.
+  -- Scoped to the exact routes (NOT a blanket /bff/public/**) — the authed
+  -- /bff/announcements/** and ROLE_ADMIN /bff/admin/** prefixes stay gated below.
+  ('hugmesh-fe-gateway',   '/bff/public/announcements/**', 'PUBLIC', true),
+  ('hugmesh-fe-gateway',   '/bff/public/appeal-contact',   'PUBLIC', true),
+  -- Fleet-owner surface — the ONE /bff/admin/** subpath a non-superadmin
+  -- ROLE_FLEET_ADMIN capability reaches (the owner+domain tenancy wall + fleet
+  -- entitlement are enforced in admin-bff's PhoneFleetOwnerController). The
+  -- longer /bff/admin/phone-fleet/** pattern wins the longest-match over the
+  -- /bff/admin/** ROLE_ADMIN floor below, so a pure fleet owner is not
+  -- default-denied. Mirrors the baked CanonicalSeed.fe() rows.
+  ('hugmesh-fe-gateway',   '/bff/admin/phone-fleet/**', 'ROLE_FLEET_ADMIN', true),
+  ('hugmesh-fe-gateway',   '/bff/admin/phone-fleet/**', 'ROLE_ADMIN',       true),
+  ('hugmesh-fe-gateway',   '/bff/admin/phone-fleet/**', 'ROLE_SUPERADMIN',  true),
   ('hugmesh-fe-gateway',   '/bff/admin/**',         'ROLE_ADMIN', true),
+  -- Superadmin platform console at the PUBLIC browser door (hugmesh-generator#244
+  -- = ACCEPT, decision 41, 2026-09-17). Dual-write partner of the baked
+  -- CanonicalSeed.fe() row added in hugmesh-gateway#33: without this row here the
+  -- local-dev compose stack still shows the pre-#244 posture (NO_RULE -> forward)
+  -- even after #33 merges, because this file REPLACES the baked floor wholesale
+  -- when Postgres loads. No games-services DENY refinement here, same as the
+  -- baked copy (decision 41 authorises exactly this one row).
+  ('hugmesh-fe-gateway',   '/bff/superadmin/**',    'ROLE_SUPERADMIN', true),
+  -- Wiki BFF (/bff/wiki/** -> hugmesh-wiki-bff-api), all three rows (decision
+  -- 80a = B, hugmesh-generator#329, 2026-09-23). Mirrors the cluster seed
+  -- (route-access/initdb/20-schema.sql) + the baked CanonicalSeed.fe() rows role
+  -- for role: the superadmin + admin console seams win the longest match over the
+  -- ROLE_WIKI access floor. Do NOT pair ROLE_WIKI on the admin row or ROLE_ADMIN on
+  -- the floor. (This file has no mfa_required column; the cluster seed carries the
+  -- decision-80b flag for the two console rows.)
+  ('hugmesh-fe-gateway',   '/bff/wiki/superadmin/**', 'ROLE_SUPERADMIN', true),
+  ('hugmesh-fe-gateway',   '/bff/wiki/admin/**',      'ROLE_ADMIN',      true),
+  ('hugmesh-fe-gateway',   '/bff/wiki/**',            'ROLE_WIKI',       true),
   -- Character Forge (OPTIONAL slug `character-forge`): the 3D character-maker
   -- remote UI shell + its BFF. Plain ROLE_USER capability floor
   -- (character-studio precedent); do NOT pair ROLE_ADMIN on a capability floor
@@ -163,6 +218,12 @@ INSERT INTO gateway_route_access (gateway, url_pattern, role, allow) VALUES
   -- (route-access/initdb/20-schema.sql) + the baked CanonicalSeed.fe() rows.
   ('hugmesh-fe-gateway',   '/character-forge/**',     'ROLE_USER', true),
   ('hugmesh-fe-gateway',   '/bff/character-forge/**', 'ROLE_USER', true),
+  -- hugmesh-games (OPTIONAL slug `games`) namespace admin UI, namespaced under
+  -- /games/** so it does not collide with the platform /admin/** row above. Same
+  -- games + (admin|mod) gate as the be-gateway games rows: keyed on the DERIVED
+  -- composite ROLE_GAMES_ADMIN ONLY, so a single role is default-deny and the one
+  -- allow row encodes the AND. Mirrors the baked CanonicalSeed.fe() row.
+  ('hugmesh-fe-gateway',   '/games/admin/**',       'ROLE_GAMES_ADMIN', true),
   -- SERVICE-ONLY INTERNAL INGEST SURFACES: explicit DENY. The fe route table
   -- Ant-matches `/bff/user/**` -> user-bff, `/bff/mesh/**` -> mesh-bff and the
   -- `/bff/**` -> admin-bff catch-all, so those `**` predicates DO route the

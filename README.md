@@ -304,6 +304,40 @@ never a user-settable claim.
   single-issuer cluster emits `DOMAIN_default` for every token and **nothing else
   changes** (back-compat). When populated, only listed issuers are trusted; an
   unknown `iss` **fails closed** (401) before any authority is emitted.
+- **Onion hosts** (hugmesh-gateway#38). A Tor v3 onion name is minted on the node
+  at first boot, so it cannot be a literal in `app.tenancy.hosts`.
+  `app.tenancy.hosts-file` (`APP_TENANCY_HOSTS_FILE`) names a runtime file — a
+  plain file or a mounted ConfigMap key — of `<hash>.onion=<domain>` lines
+  (`#` comments, blank lines and CSV runs allowed) that the node's Tor reconcile or
+  admin-bff appends after a mint. The registry re-reads it every
+  `app.tenancy.hosts-file-refresh-ms` (default 5 s, content-compared, swapped
+  atomically); a missing file means no runtime entries, an unreadable one keeps the
+  last-known-good map. Only `.onion` keys are accepted from the file and a file line
+  never overrides a host set in `app.tenancy.hosts`. Once **onion tenancy** is
+  configured — the file path is set, or `app.tenancy.hosts` maps a named onion — an
+  **unmapped `.onion` Host is never served**: the route-access filter answers 403
+  (`X-Route-Denied`) for every caller that reaches it — anonymous on a `permitAll`
+  path, and every authenticated caller, superadmin included — instead of collapsing
+  to `default`, so an unregistered onion can never serve another brand. (Spring
+  Security runs before that filter, so an anonymous request for a protected path on
+  such a Host is answered 401 or sent to login first; either way no brand is served.) Without onion tenancy there is
+  at most one onion (the mesh's own door, the default brand's) and it resolves like
+  any unmapped host, to `default` — even when `APP_TENANCY_HOSTS`/`_ISSUERS` are set
+  for HTTPS brands (the compose `BRAND_B=1` lane and Studio's own-Casdoor domains
+  set them on `hugmesh-fe-gateway`, whose `TOR=1` onion door must keep working). The mapping is routing, not isolation: Tor
+  forwards whatever `Host` the client sends, so a client can still name another
+  brand's HTTPS host over any onion; per-brand isolation remains the issuer-derived
+  domain check below. Writing the file is not done here — the node/compose half is
+  tracked on hugmesh/hugmesh-generator#582. **Contract for that writer:** (1) once
+  `APP_TENANCY_HOSTS_FILE` is set, EVERY unmapped onion is refused — including the
+  mesh's own default-brand door — so the writer must register that onion too, as
+  `<hash>.onion=default`, not only the extra brands' onions; (2) write a temp file
+  in the same directory and `rename` it over the target (the poll reads the file
+  non-atomically, so an in-place truncate-and-rewrite can briefly drop onions, which
+  then fail closed until the next poll); (3) leave
+  `APP_TENANCY_HOSTS_FILE_REFRESH_MS` unset or give it a number — an EMPTY value (the
+  compose `${VAR:-}` idiom) resolves the schedule to `""` and the gateway fails to
+  start. `#` starts a comment anywhere on a line.
 - **`TenancyResourceServerConfig`** is **config-gated and opt-in**: it contributes
   a per-issuer `ReactiveAuthenticationManagerResolver` only when
   `app.tenancy.issuers` genuinely carries `issuer=domain` pairs (a
@@ -363,7 +397,14 @@ unscoped/`default`-owned key remains writable single-tenant (back-compat).
 - **Image-builder / superadmin console** — `/bff/image-builds/**` is gated on the
   granted `ROLE_IMAGE_BUILDER` capability (not an admin default), with
   `/bff/image-builds/arch/**` and `/bff/superadmin/**` reserved for `ROLE_SUPERADMIN`
-  (longest-pattern-match makes the arch surface superadmin-only).
+  (longest-pattern-match makes the arch surface superadmin-only). Those are `be`
+  (tailnet) rows; since hugmesh-generator#244 = ACCEPT (decision 41)
+  `CanonicalSeed.fe()` **also** carries `/bff/superadmin/** -> ROLE_SUPERADMIN`, so
+  the superadmin platform console is governed at the **public browser door** too —
+  on the datastore-unreachable fallback it is a 403 with `X-Route-Denied` instead
+  of a `NO_RULE` forward into admin-bff. The cluster Postgres seed additionally
+  carries an fe `/bff/superadmin/games-services/**` **deny** row (decision 28 = D)
+  that the baked floor deliberately does not mirror.
 - **Fleet-owner phone/MDM console gate** — `/bff/admin/phone-fleet/**` is gated on
   the granted `ROLE_FLEET_ADMIN` capability (also reachable by `ROLE_ADMIN` /
   `ROLE_SUPERADMIN`), the one `/bff/admin/**` subpath a non-superadmin fleet-owner
@@ -377,7 +418,8 @@ unscoped/`default`-owned key remains writable single-tenant (back-compat).
   to the cluster CA and validates the backend cert on the **proxy leg only**.
   Enabled with `HUGMESH_GATEWAY_MTLS_ENABLED=true`; store passwords bind from
   `hugmesh.tls.*` (written by the chart's keystore initContainer into the in-pod
-  `/stores/application.properties`, never in git).
+  `/stores/application.properties`, never in git). A store that will not open stops
+  startup with an error naming the store and its password key (see *Known Gaps*).
 - **PKI cert-chain builder** — this repo is the canonical home of the platform
   cert-chain builder: [`scripts/pki/build-chained-cert.sh`](scripts/pki/build-chained-cert.sh)
   mints leaf/intermediate certs off a shared root (one root, two intermediates,
@@ -397,6 +439,8 @@ unscoped/`default`-owned key remains writable single-tenant (back-compat).
 | `API_DOWNSTREAM_URI` | default `/api/**` backend |
 | `APP_TENANCY_ISSUERS` | CSV `issuerUri=domain,…` (opt-in multi-brand; empty ⇒ single-tenant) |
 | `APP_TENANCY_HOSTS` | CSV `hostSuffix=domain,…` (defense-in-depth Host→domain map) |
+| `APP_TENANCY_HOSTS_FILE` | path to a runtime `<hash>.onion=domain` host-map file (re-read on change; see *Onion hosts*) |
+| `APP_TENANCY_HOSTS_FILE_REFRESH_MS` | re-read interval for that file (default `5000`) |
 | `HUGMESH_GATEWAY_MTLS_ENABLED` + `HUGMESH_TLS_*` | downstream mTLS leg |
 | `HUGMESH_GATEWAY_BFF_EXCHANGE_ENABLED` | enable the dark `bff_`→custody-JWT exchange filter (default off) |
 | `APP_BFF_SESSION_ENABLED` / `BFF_BASE_URL` | the `bff_`/cookie introspection filter (default **on**, PR #70) + its admin-bff base URL; set the former to `false` to dark-disable |
@@ -545,10 +589,20 @@ forward-looking, not-yet-started work in *Roadmap* below):
   the packaged `${HUGMESH_TLS_KEY_STORE_PASSWORD:}` (empty) and `KeyStore.load(...)`
   could not open the real PKCS12 store. Fixed chart-side in hugmesh-generator
   `39f9fce4` (2026-07-17; the same emitted-file block is in all nine BFF/API
-  manifests), re-verified against the chart 2026-09-09. What remains unproven is a real
-  in-cluster pod boot with the flag on. `DownstreamMtlsConfig.load` fails fast and
-  never falls back to plaintext, so a wrong store or password is a crash-loop, not a
-  silent downgrade.
+  manifests), re-verified against the chart 2026-09-09 and again 2026-09-24 (every
+  gateway Application that sets the flag — be, fe, superadmin — also sets
+  `keystore.enabled: true`, which is what adds `file:/stores/` to the additional
+  location). The Spring half of that hand-off is now *executed* rather than read:
+  `DownstreamMtlsStoresFileLoadingTest` runs this repo's Boot version and packaged
+  `application.yml` and shows the plain file loading under `routes` alone (overriding
+  the empty fallback) while the old profile-named file stays unloaded. What remains
+  unproven is a real in-cluster pod boot with the flag on. The backstop is under test
+  too (`DownstreamMtlsConfigTest`): store loading fails fast and never falls back to
+  plaintext, and the startup error names the store, the exact `hugmesh.tls.*-password`
+  key, and — when that key is empty, the #1 signature the JDK alone reports as an
+  indistinguishable "keystore password was incorrect" — the unloaded
+  `/stores/application.properties` as the usual cause. An empty password is not refused
+  up front, because a passwordless PKCS12 is a supported shape (also tested).
 
 ## Roadmap
 

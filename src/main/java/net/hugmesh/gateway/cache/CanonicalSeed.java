@@ -3,6 +3,7 @@ package net.hugmesh.gateway.cache;
 import net.hugmesh.gateway.cache.GatewayRouteAccessService.Rule;
 
 import java.util.List;
+import java.util.Set;
 
 /**
  * The canonical {@code gateway_route_access} seed from the route-access
@@ -65,21 +66,110 @@ final class CanonicalSeed {
         return List.of(r(gateway, "/**", "ROLE_ADMIN"));
     }
 
+    /**
+     * DECISION 56 = "a declared set of privileged rows" (hugmesh-generator#347,
+     * operator answer 2026-09-18; option 2 of the three named on
+     * hugmesh-gateway#35, which hugmesh-generator#244 comment 2026-09-18T03:52Z
+     * left open as decision 41's residual). D8's default — the baked floor NEVER
+     * demands a second factor — stays the default for every row {@link #r} builds
+     * EXCEPT the ones named here. Bounding it to a small, explicit set (rather
+     * than "every row that carries it in Postgres", option 3) keeps the lock-out
+     * risk D8 exists to avoid bounded to surfaces an operator can name and review.
+     *
+     * <p><b>DERIVED, not invented</b> — the intersection of two things measured
+     * against generator {@code origin/main} @ {@code fefd5084} and this repo's
+     * merged tree (hugmesh-gateway#33, decision 41, folded in alongside this
+     * change) on 2026-09-18:
+     * <ol>
+     *   <li>every {@code ALLOW} row the cluster Postgres seed's blanket flip UPDATE
+     *       (generator {@code specs/cluster/manifests/route-access/initdb/
+     *       20-schema.sql}, the statement right after the decision-28 row-scoped
+     *       one) sets {@code mfa_required = true} on — its predicate is
+     *       {@code allow = true AND (url_pattern = '/bff/admin' OR url_pattern LIKE
+     *       '/bff/admin/%' OR url_pattern = '/bff/superadmin' OR url_pattern LIKE
+     *       '/bff/superadmin/%')}; AND
+     *   <li>the rows {@link #be()} / {@link #fe()} actually bake, i.e. this set
+     *       names no row {@link #r} is never called with.
+     * </ol>
+     *
+     * <p><b>WIDENED by decision 80b = B</b> (hugmesh-generator#329, operator answer
+     * 2026-09-23): the cluster seed's flip also takes the PER-SERVICE admin-console
+     * and superadmin-console shapes ({@code url_pattern LIKE '/bff/%/admin/%'} and
+     * {@code LIKE '/bff/%/superadmin/%'}), so the forum, wiki and owncast console
+     * rows need a fresh second factor once {@code APP_MFA_ENFORCE_PRIVILEGED_FLOOR}
+     * is on. That generator edit is the DEFERRED gen-route lane's; this set carries
+     * the baked half. Of those per-service rows {@link #fe()} bakes only the two
+     * wiki ones (decision 80a = B) — it carries no forum or owncast row at all, so
+     * there is nothing else here to declare.
+     *
+     * <pre>
+     *   be():  /bff/superadmin/**                ROLE_SUPERADMIN
+     *   fe():  /bff/admin/phone-fleet/**         ROLE_FLEET_ADMIN
+     *   fe():  /bff/admin/phone-fleet/**         ROLE_ADMIN
+     *   fe():  /bff/admin/phone-fleet/**         ROLE_SUPERADMIN
+     *   fe():  /bff/admin/**                     ROLE_ADMIN
+     *   fe():  /bff/superadmin/**                ROLE_SUPERADMIN   (decision 41)
+     *   fe():  /bff/wiki/admin/**                ROLE_ADMIN        (decision 80b)
+     *   fe():  /bff/wiki/superadmin/**           ROLE_SUPERADMIN   (decision 80b)
+     * </pre>
+     *
+     * <p><b>Deliberately NOT in the set</b> (so a future "obviously belongs"
+     * addition has to argue past this, not slip in):
+     * <ul>
+     *   <li>{@code be()}'s {@code /bff/image-builds/arch/** -> ROLE_SUPERADMIN} —
+     *       not under any prefix the flip touches, so its Postgres counterpart is
+     *       {@code mfa_required=false} too (pki's former {@code /**} headscale row
+     *       was the other example here; decision 79 dropped it);
+     *   <li>{@code fe()}'s {@code /bff/wiki/** -> ROLE_WIKI} floor — decision 80b
+     *       reaches only the admin/superadmin console rows beneath it;
+     *   <li>the {@code fe} {@code /bff/superadmin/games-services/**} DENY row
+     *       (decision 28 = D) — it is {@code mfa_required=true} in the CLUSTER
+     *       seed, but {@link #decide} raises {@code mfaRequiredOnGrant} only from
+     *       rows that GRANT (deny rows can never raise it), decision 41 forbids
+     *       baking it into the floor at all (D8 would carry the wall without the
+     *       floor — see the {@link #fe()} row comment), and this decision does not
+     *       authorise mirroring it either — asked and answered NO on
+     *       hugmesh-generator#347: this mechanism WOULD let a future edit declare
+     *       it (it is an {@code ALLOW}-row-only gate, not a deny-row gate, so
+     *       declaring a deny row here would be inert by construction, not merely
+     *       unauthorised), and it is not done.
+     * </ul>
+     *
+     * <p>Entries are {@link Rule#id()} strings — the exact {@code "seed:" +
+     * gateway + ":" + pattern + ":" + role} {@link #r} below computes — so a typo
+     * here is simply never matched rather than silently mis-targeting a different
+     * row; {@code canonicalSeed_mfaRequiredFallbackRows_everyEntryMatchesARealBakedRow}
+     * pins that every entry actually is a row {@link #forGateway} emits somewhere.
+     */
+    static final Set<String> MFA_REQUIRED_FALLBACK_ROWS = Set.of(
+            "seed:" + BE + ":/bff/superadmin/**:ROLE_SUPERADMIN",
+            "seed:" + FE + ":/bff/admin/phone-fleet/**:ROLE_FLEET_ADMIN",
+            "seed:" + FE + ":/bff/admin/phone-fleet/**:ROLE_ADMIN",
+            "seed:" + FE + ":/bff/admin/phone-fleet/**:ROLE_SUPERADMIN",
+            "seed:" + FE + ":/bff/admin/**:ROLE_ADMIN",
+            "seed:" + FE + ":/bff/superadmin/**:ROLE_SUPERADMIN",
+            "seed:" + FE + ":/bff/wiki/admin/**:ROLE_ADMIN",
+            "seed:" + FE + ":/bff/wiki/superadmin/**:ROLE_SUPERADMIN");
+
     private static Rule r(String gateway, String pattern, String role) {
         // domain=null => UNSCOPED (applies to any target brand). The baked-in seed
         // is the per-tier floor; per-brand domain scoping is carried only by the
         // admin-managed Postgres rows.
         //
-        // mfaRequired=false (D8): the baked-in floor NEVER demands a second factor —
-        // this is the gateway HALF of the dual-write trio (it MUST match the
-        // generator Postgres seed `mfa_required false` in
-        // specs/cluster/manifests/route-access/initdb/20-schema.sql AND the
-        // admin-bff 001-gateway-route-access.xml copy, both landing in lockstep).
-        // Keeping the seed false means a datastore-unreachable fallback can never
-        // accidentally lock out a privileged surface on the bare floor; mfa_required
-        // is enabled per-row only by an admin-managed Postgres row.
-        return new Rule("seed:" + gateway + ":" + pattern + ":" + role,
-                gateway, pattern, role, null, true, null, false);
+        // mfaRequired (D8, narrowed by decision 56): false for every row EXCEPT
+        // the ones named in MFA_REQUIRED_FALLBACK_ROWS above, which carry true.
+        // This is the gateway HALF of the dual-write trio — it MUST match the
+        // generator Postgres seed's blanket-flip predicate in
+        // specs/cluster/manifests/route-access/initdb/20-schema.sql (restricted to
+        // rows CanonicalSeed actually bakes) AND the admin-bff
+        // 001-gateway-route-access.xml copy (DDL only — no seed rows to match).
+        // Keeping every OTHER row false means a datastore-unreachable fallback can
+        // never accidentally lock out a surface nobody declared; mfa_required is
+        // enabled per-row beyond this declared set only by an admin-managed
+        // Postgres row.
+        String id = "seed:" + gateway + ":" + pattern + ":" + role;
+        boolean mfaRequired = MFA_REQUIRED_FALLBACK_ROWS.contains(id);
+        return new Rule(id, gateway, pattern, role, null, true, null, mfaRequired);
     }
 
     /**
@@ -120,22 +210,28 @@ final class CanonicalSeed {
         return List.of(
                 r(PKI, "/api/auth/**",    "ROLE_USER"),
                 r(PKI, "/login/**",       "PUBLIC"),
-                r(PKI, "/.well-known/**", "PUBLIC"),
-                // SUPERADMIN floor for the headscale control plane (bug #15). The pki
-                // gateway also fronts the cross-domain headscale control plane on its
-                // own Host (application-pki.yml: the `headscale` route is matched by
-                // `Host=scale.hugmesh.net` with NO Path predicate, so its paths
-                // are NOT covered by the three rows above). Without a rule those paths
-                // got Decision.NO_RULE and ANY authenticated same-domain ROLE_USER
-                // reached the superadmin-tier control plane. This `/**` catch-all is
-                // the correct anchor (headscale has Host-but-no-Path); longest-pattern-
-                // match KEEPS the three rows above intact for their own paths while
-                // EVERYTHING else (headscale) floors to SUPERADMIN. MUST be
-                // ROLE_SUPERADMIN, NOT ROLE_ADMIN — a per-domain admin must NOT reach
-                // the cross-domain infra control plane (only SUPERADMIN crosses
-                // domains; see GatewayRouteAccessFilter). Mirrors the be() precedent
-                // `/bff/superadmin/** -> ROLE_SUPERADMIN`.
-                r(PKI, "/**",             "ROLE_SUPERADMIN"));
+                // NO bare "/**" row here (decision 79 = B, hugmesh-admin-bff-api#57,
+                // 2026-09-23). The pki gateway also fronts the cross-domain headscale
+                // control plane on its own Host (hugmesh-pki-gateway
+                // application-pki.yml: the `headscale` route matches
+                // `Host=scale.hugmesh.net` with NO Path predicate). Its SUPERADMIN
+                // floor used to be a `/** -> ROLE_SUPERADMIN` row here (bug #15), the
+                // one row decision 61 left as a named exception to "no seed ships a
+                // bare /**". That row could not stop a same-brand ROLE_ADMIN or
+                // ROLE_GAME-MASTER — GatewayRouteAccessFilter forwards both in their
+                // own domain BEFORE any rule is read — and the admin API can never
+                // recreate a `/**` row. The floor now lives in SecurityConfig: EVERY
+                // request whose Host matches the `headscale` route's own Host
+                // predicate needs ROLE_SUPERADMIN, ahead of PUBLIC_PATHS (anonymous
+                // 401, everyone else 403). So this row is gone, and with it every
+                // bare "/**" row in every seed this repo ships
+                // (GatewayRouteAccessServiceTest#noSeed_shipsABareDoubleStarRow_zeroExceptions).
+                //
+                // Consequence on a NON-headscale Host of the pki tier: a path none of
+                // these three rows matches (e.g. the signup-gate's /api/signup route)
+                // is NO_RULE again and is forwarded to any authenticated principal on
+                // the coarse authenticated() floor, as it was before bug #15's row.
+                r(PKI, "/.well-known/**", "PUBLIC"));
     }
 
     private static List<Rule> be() {
@@ -378,6 +474,112 @@ final class CanonicalSeed {
                 r(FE, "/bff/admin/phone-fleet/**", "ROLE_ADMIN"),
                 r(FE, "/bff/admin/phone-fleet/**", "ROLE_SUPERADMIN"),
                 r(FE, "/bff/admin/**",      "ROLE_ADMIN"),
+                // ── SUPERADMIN PLATFORM CONSOLE at the PUBLIC BROWSER DOOR ────
+                // #244 = ACCEPT (decision 41, 2026-09-17). This is the DUAL-WRITE
+                // PARTNER of the cluster Postgres seed row
+                //   ('hugmesh-fe-gateway','/bff/superadmin/**','ROLE_SUPERADMIN',true)
+                // in generator specs/cluster/manifests/route-access/initdb/20-schema.sql,
+                // which landed FIRST and names this file as the half still missing.
+                // The two halves must stay in lockstep: without this row the
+                // datastore-unreachable fallback is WEAKER than the Postgres rules
+                // on the highest-value surface the public browser door fronts.
+                //
+                // WHAT IT CHANGES on the fallback, for one request by an
+                // authenticated principal that is NOT admin/superadmin:
+                //   BEFORE  no fe pattern matched /bff/superadmin/… at all, so
+                //           decide() returned NO_RULE (ungoverned) and the filter
+                //           FORWARDED on the coarse authenticated() floor. The
+                //           refusal still happened — admin-bff's own
+                //           SecurityConfig `pathMatchers("/bff/superadmin/**")
+                //           .hasRole("SUPERADMIN")` — but one layer in, with NO
+                //           X-Route-Denied header, nothing in the gateway's denial
+                //           log, and the request crossing the namespace boundary.
+                //   AFTER   this is the longest matching pattern, the caller holds
+                //           no granting row at that length ⇒ governed-but-ungranted
+                //           ⇒ DENY at the door, 403 WITH
+                //           `X-Route-Denied: hugmesh-fe-gateway:<path>`.
+                // The status code does NOT move; the layer, the header and the log do.
+                //
+                // WHAT IT DOES *NOT* CHANGE. ROLE_ADMIN and ROLE_SUPERADMIN
+                // short-circuit in GatewayRouteAccessFilter BEFORE decide() is
+                // consulted, so no row here alters what a privileged principal
+                // reaches: a plain ROLE_ADMIN still arrives at admin-bff and is
+                // still refused there by hasRole("SUPERADMIN"). This is
+                // defence-in-depth and a clearer failure mode, NOT the closing of
+                // an open door.
+                //
+                // NO games-services DENY refinement HERE — and, since 2026-09-17,
+                // that is a DELIBERATE DIVERGENCE from the cluster seed rather than
+                // a shared omission. Read this before "restoring parity":
+                //   * #244's ACCEPT (decision 41) is stated "without the
+                //     games-services deny row", and decision 41 authorises exactly
+                //     ONE row here — the platform prefix above.
+                //   * the CLUSTER seed DOES carry
+                //     ('hugmesh-fe-gateway','/bff/superadmin/games-services/**',
+                //      'ROLE_SUPERADMIN',false) again, put back by operator
+                //     decision 28 = D (hugmesh-generator#347, landed 4764ab4f) with
+                //     mfa_required pinned TRUE on the row itself, which is the whole
+                //     reason D was chosen over leaving it out: isMfaRequiredSurface()
+                //     is allow-blind and reads the LONGEST match, so the deny row
+                //     carries the step-up floor for that subtree instead of stripping
+                //     it.
+                //   * a baked COPY could not reproduce that: D8 forbids
+                //     mfa_required=true on any baked row (see r() below), so the copy
+                //     would carry the wall WITHOUT the floor. What it WOULD change is
+                //     decide()'s answer on the fallback for a principal holding
+                //     ROLE_SUPERADMIN at /bff/superadmin/games-services/… — ALLOW on
+                //     the platform row today, explicit DENY with a copy — and
+                //     GatewayRouteAccessFilter short-circuits ROLE_SUPERADMIN BEFORE
+                //     decide(), so even that is inert for a live request.
+                // Whether the baked floor should mirror the D28 row is therefore NOT
+                // decided by 41 and is NOT decided here; it is recorded on #244. The
+                // measured divergence is asserted, in both repos, rather than
+                // narrated: see canonicalSeed_feGateway_superadminRow_* and
+                // hugmesh-generator's fallback-floor-parity.feature.
+                //
+                // UPDATE 2026-09-18 (decision 56, hugmesh-generator#347): this
+                // row's id IS a member of MFA_REQUIRED_FALLBACK_ROWS above, so
+                // r() now computes mfaRequired=true for it — the paragraph
+                // that used to be here ("mfaRequired STAYS false ... the baked
+                // floor deliberately does NOT carry mfa_required=true") is no
+                // longer accurate FOR THIS ROW and has been corrected. The
+                // cluster seed's flip UPDATE (`SET mfa_required = true WHERE
+                // allow AND url_pattern LIKE '/bff/superadmin/%'`) reaches the
+                // POSTGRES copy of this row; decision 56 closes the residual
+                // that used to leave the BAKED floor without the same step-up
+                // requirement, so a dual-DB outage no longer drops MFA
+                // enforcement on this exact prefix — see
+                // canonicalSeed_declaredMfaRows_isMfaRequiredSurfaceIsTrueOnTheFallback
+                // in GatewayRouteAccessServiceTest. Every OTHER baked row not
+                // named in MFA_REQUIRED_FALLBACK_ROWS still keeps D8's
+                // mfaRequired=false default unchanged.
+                r(FE, "/bff/superadmin/**", "ROLE_SUPERADMIN"),
+                // ── Wiki BFF (/bff/wiki/** -> hugmesh-wiki-bff-api) ────────────
+                // Decision 80a = B (hugmesh-generator#329, operator answer
+                // 2026-09-23): ALL THREE wiki rows, mirroring the cluster Postgres
+                // seed (generator specs/cluster/manifests/route-access/initdb/
+                // 20-schema.sql:1068-1070) role for role. Before this, fe() carried no
+                // wiki row, so from gateway start until the first successful
+                // Postgres/Cassandra load (or for a gateway whose datastores never
+                // answer) every /bff/wiki path was NO_RULE and forwarded to any
+                // signed-in user, and wiki-bff was the only refusal. Longest-pattern-
+                // match makes the two console rows win over the floor for their own
+                // subtrees. Do NOT pair ROLE_WIKI on the admin row or ROLE_ADMIN on the
+                // floor (the cluster seed's comment says why: admins reach the console
+                // without ROLE_WIKI, and pairing the floor would hand every
+                // wiki-floor endpoint to admins not granted wiki access).
+                //
+                // What these rows still cannot do: a same-domain ROLE_ADMIN (and
+                // ROLE_SUPERADMIN anywhere) short-circuits in GatewayRouteAccessFilter
+                // BEFORE decide(), so a plain ADMIN on /bff/wiki/superadmin/** is still
+                // forwarded and refused by wiki-bff's hasRole('SUPERADMIN'). The two
+                // console rows ARE in MFA_REQUIRED_FALLBACK_ROWS (decision 80b = B),
+                // and the privileged MFA floor runs ABOVE that bypass, so once
+                // APP_MFA_ENFORCE_PRIVILEGED_FLOOR is on those principals need a fresh
+                // second factor here even on the baked floor.
+                r(FE, "/bff/wiki/superadmin/**", "ROLE_SUPERADMIN"),
+                r(FE, "/bff/wiki/admin/**",      "ROLE_ADMIN"),
+                r(FE, "/bff/wiki/**",            "ROLE_WIKI"),
                 // Character Forge (OPTIONAL slug `character-forge`): the 3D
                 // character-maker remote (/character-forge/** UI shell,
                 // StripPrefix'd to the character-forge-ui nginx) and its BFF

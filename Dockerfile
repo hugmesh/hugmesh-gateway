@@ -9,10 +9,30 @@ WORKDIR /work
 COPY mvnw mvnw.cmd ./
 COPY .mvn .mvn
 COPY pom.xml ./
+# CI-only Maven settings (GitHub Packages for hugmesh-commons + hugmesh-parent). Used
+# ONLY when the packages_read_token build secret is mounted - see the RUN lines below.
+# The compose lane threads its own settings through ENV MAVEN_ARGS (patch-stack-src.sh in
+# hugmesh-generator), which is why there is no root settings.xml and no `-s` on the mvnw
+# lines: both would silently change what that lane builds.
+COPY .github/maven-ci-settings.xml .github/maven-ci-settings.xml
+ARG UPSTREAM_PACKAGES_ACTOR
+# The read token is a BuildKit SECRET (never an ARG/ENV, never in a layer or the image
+# history). When it is not mounted the exported MAVEN_ARGS is simply not set here and
+# whatever the environment already carries (the compose lane's ENV) is left alone.
 # Resolve deps in a separate layer for cache friendliness.
-RUN ./mvnw -B dependency:go-offline
+RUN --mount=type=secret,id=packages_read_token \
+    sh -euc '\
+      if [ -f /run/secrets/packages_read_token ]; then \
+        export UPSTREAM_PACKAGES_TOKEN="$(cat /run/secrets/packages_read_token)" MAVEN_ARGS="-s .github/maven-ci-settings.xml"; \
+      fi; \
+      ./mvnw -B dependency:go-offline'
 COPY src src
-RUN ./mvnw -B package -DskipTests
+RUN --mount=type=secret,id=packages_read_token \
+    sh -euc '\
+      if [ -f /run/secrets/packages_read_token ]; then \
+        export UPSTREAM_PACKAGES_TOKEN="$(cat /run/secrets/packages_read_token)" MAVEN_ARGS="-s .github/maven-ci-settings.xml"; \
+      fi; \
+      ./mvnw -B package -DskipTests'
 
 FROM eclipse-temurin:25-jre
 # curl is required by this image's docker-compose HEALTHCHECK (actuator/health/readiness);

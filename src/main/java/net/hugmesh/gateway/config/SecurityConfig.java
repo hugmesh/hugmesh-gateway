@@ -1,10 +1,15 @@
 package net.hugmesh.gateway.config;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.cloud.gateway.config.GatewayProperties;
+import org.springframework.cloud.gateway.handler.predicate.PredicateDefinition;
+import org.springframework.cloud.gateway.route.RouteDefinition;
 import org.springframework.core.convert.converter.Converter;
 import org.springframework.security.access.expression.method.DefaultMethodSecurityExpressionHandler;
 import org.springframework.security.access.expression.method.MethodSecurityExpressionHandler;
@@ -18,9 +23,17 @@ import org.springframework.security.core.GrantedAuthority;
 import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.security.oauth2.server.resource.authentication.ReactiveJwtAuthenticationConverter;
 import org.springframework.security.web.server.SecurityWebFilterChain;
+import org.springframework.security.web.server.util.matcher.ServerWebExchangeMatcher;
+import org.springframework.util.AntPathMatcher;
 import org.springframework.web.server.ServerWebExchange;
 import reactor.core.publisher.Flux;
 import net.hugmesh.gateway.security.DomainRegistry;
+
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Locale;
 
 /**
  * Casdoor-aware OAuth2 resource-server config for the gateway. Mirrors
@@ -43,6 +56,9 @@ import net.hugmesh.gateway.security.DomainRegistry;
  *   <li>{@code /api/registration/**} — public (external-OAuth signup
  *       must work for unauthenticated visitors).</li>
  *   <li>{@code /api/login/**} — public (federated login remote).</li>
+ *   <li>PKI tier only: EVERY request on the headscale route's Host —
+ *       {@code ROLE_SUPERADMIN}, checked FIRST, so nothing above is public there
+ *       (decision 79; see {@link #headscaleHostPatterns}).</li>
  *   <li>everything else — authenticated.</li>
  * </ul>
  *
@@ -94,6 +110,42 @@ public class SecurityConfig {
      *  anonymous traffic straight to it. */
     private final boolean feTier;
 
+    private static final Logger log = LoggerFactory.getLogger(SecurityConfig.class);
+
+    /** The id of the route that fronts the headscale control plane — hugmesh-pki-gateway
+     *  {@code application-pki.yml} (and the generator's {@code apps/20-gateway-pki.yaml},
+     *  which rebrand rewrites) both declare it as {@code id: headscale} with a
+     *  {@code Host} predicate and NO {@code Path} predicate. */
+    static final String HEADSCALE_ROUTE_ID = "headscale";
+
+    /**
+     * PKI-TIER HEADSCALE HOST GATE (decision 79 = B, hugmesh-admin-bff-api#57,
+     * operator answer 2026-09-23). The {@code Host} patterns of the {@code headscale}
+     * route, lower-cased; EMPTY (gate off) on every other tier and on a pki instance
+     * with no headscale route. Every request whose Host matches one of them needs
+     * {@code ROLE_SUPERADMIN}, as the FIRST {@code authorizeExchange} rule — ahead of
+     * {@link #PUBLIC_PATHS}, so no path on that Host is public (anonymous 401,
+     * everyone else 403).
+     *
+     * <p><b>Why here and not a route-access row.</b> headscale is routed by Host alone,
+     * so its old floor was a bare {@code /** -> ROLE_SUPERADMIN} row in
+     * {@code CanonicalSeed.pki()} — which (a) the admin API can never recreate
+     * (decision 61) and (b) never stopped a same-brand {@code ROLE_ADMIN} /
+     * {@code ROLE_GAME-MASTER}, because {@code GatewayRouteAccessFilter} forwards both
+     * in their own domain before it reads any rule. This layer runs before that
+     * filter and before its bypasses, so it stops them. The row is dropped.
+     *
+     * <p><b>Where the host comes from.</b> NOT a hand-kept copy of
+     * {@code scale.hugmesh.net}: it is read from the {@code headscale} route's own
+     * {@code Host} predicate in the bound {@link GatewayProperties} route list (the
+     * {@code spring.cloud.gateway.server.webflux.routes} the image serves) — the one
+     * place the rebrand rewrites. (hugmesh-pki-gateway's Liquibase
+     * {@code gateway_routes} seed is NOT read: nothing in this gateway loads that
+     * table.) A pki instance that HAS a headscale route whose Host cannot be derived
+     * fails startup rather than serving headscale ungated.
+     */
+    private final List<String> headscaleHostPatterns;
+
     /** D8 MFA marker derivation — {@code app.mfa.enabled} (default {@code false},
      *  ships dark). When off the converter emits the byte-identical legacy
      *  authority set and {@code MFA_SATISFIED} is never produced. */
@@ -110,22 +162,175 @@ public class SecurityConfig {
                                   tenantAuthManagerResolver,
                           @Value("${spring.application.name:}") String applicationName,
                           @Value("${app.mfa.enabled:false}") boolean mfaEnabled,
-                          @Value("${app.mfa.freshness-window:600000}") long mfaFreshnessWindowMillis) {
+                          @Value("${app.mfa.freshness-window:600000}") long mfaFreshnessWindowMillis,
+                          ObjectProvider<GatewayProperties> gatewayProperties) {
+        this(domainRegistry, tenantAuthManagerResolver, applicationName, mfaEnabled,
+                mfaFreshnessWindowMillis, routesOf(gatewayProperties.getIfAvailable()));
+    }
+
+    /** Route-list form of the production constructor — the seam the headscale-gate
+     *  unit tests drive with hand-built {@link RouteDefinition}s. */
+    SecurityConfig(DomainRegistry domainRegistry,
+                   ObjectProvider<ReactiveAuthenticationManagerResolver<ServerWebExchange>>
+                           tenantAuthManagerResolver,
+                   String applicationName,
+                   boolean mfaEnabled,
+                   long mfaFreshnessWindowMillis,
+                   List<RouteDefinition> routes) {
         this.domainRegistry = domainRegistry;
         this.tenantAuthManagerResolver = tenantAuthManagerResolver;
         this.feTier = isFeTier(applicationName);
         this.mfaEnabled = mfaEnabled;
         this.mfaFreshnessWindowMillis = mfaFreshnessWindowMillis;
+        this.headscaleHostPatterns = deriveHeadscaleHostPatterns(applicationName, routes);
+        if (!headscaleHostPatterns.isEmpty()) {
+            log.info("[security] pki tier: every request on headscale Host {} requires ROLE_SUPERADMIN",
+                    headscaleHostPatterns);
+        }
+    }
+
+    /** Pre-decision-79 signature (no route definitions ⇒ the headscale host gate is
+     *  OFF). Kept so the existing slice tests compile unchanged; production uses the
+     *  {@code @Autowired} constructor above. */
+    public SecurityConfig(DomainRegistry domainRegistry,
+                          ObjectProvider<ReactiveAuthenticationManagerResolver<ServerWebExchange>>
+                                  tenantAuthManagerResolver,
+                          String applicationName,
+                          boolean mfaEnabled,
+                          long mfaFreshnessWindowMillis) {
+        this(domainRegistry, tenantAuthManagerResolver, applicationName, mfaEnabled,
+                mfaFreshnessWindowMillis, List.of());
     }
 
     /** Legacy convenience (MFA derivation OFF, default 10m window, NO tier —
-     *  the FE shell paths stay gated). Keeps the pre-D8 slice tests compiling and
-     *  proves the dark/unknown-tier default emits the byte-identical legacy
-     *  policy. Production uses the {@code @Autowired} constructor above. */
+     *  the FE shell paths stay gated, no headscale host gate). Keeps the pre-D8 slice
+     *  tests compiling and proves the dark/unknown-tier default emits the
+     *  byte-identical legacy policy. Production uses the {@code @Autowired}
+     *  constructor above. */
     public SecurityConfig(DomainRegistry domainRegistry,
                           ObjectProvider<ReactiveAuthenticationManagerResolver<ServerWebExchange>>
                                   tenantAuthManagerResolver) {
         this(domainRegistry, tenantAuthManagerResolver, "", false, 600_000L);
+    }
+
+    private static List<RouteDefinition> routesOf(GatewayProperties props) {
+        return props == null || props.getRoutes() == null ? List.of() : props.getRoutes();
+    }
+
+    /** PKI-tier detection by instance-name suffix — the SAME derivation
+     *  {@code CanonicalSeed.bySuffix} uses ({@code hugmesh-pki-gateway} and every
+     *  {@code ${BRAND}-pki-gateway}). */
+    static boolean isPkiTier(String applicationName) {
+        return applicationName != null && applicationName.endsWith("-pki-gateway");
+    }
+
+    /**
+     * The headscale route's {@code Host} patterns, lower-cased, for the pki tier;
+     * empty on every other tier and when no route has id {@value #HEADSCALE_ROUTE_ID}.
+     * Reads every argument of every {@code Host} predicate on that route: the
+     * shortcut form {@code Host=a,b} binds as {@code _genkey_0}/{@code _genkey_1}, the
+     * long form as {@code patterns} (a comma list, or {@code patterns[0]}…).
+     *
+     * @throws IllegalStateException on the pki tier when a headscale route exists but
+     *         no non-blank Host pattern can be read from it — startup fails rather
+     *         than serving headscale with no host gate.
+     */
+    static List<String> deriveHeadscaleHostPatterns(String applicationName,
+                                                    List<RouteDefinition> routes) {
+        if (!isPkiTier(applicationName) || routes == null) return List.of();
+        LinkedHashSet<String> patterns = new LinkedHashSet<>();
+        boolean headscaleRoutePresent = false;
+        for (RouteDefinition route : routes) {
+            if (route == null || !HEADSCALE_ROUTE_ID.equals(route.getId())) continue;
+            headscaleRoutePresent = true;
+            for (PredicateDefinition p : route.getPredicates()) {
+                if (p == null || !"Host".equalsIgnoreCase(p.getName()) || p.getArgs() == null) continue;
+                for (String arg : p.getArgs().values()) {
+                    if (arg == null) continue;
+                    for (String one : arg.split(",")) {
+                        String t = one.trim().toLowerCase(Locale.ROOT);
+                        if (!t.isEmpty()) patterns.add(t);
+                    }
+                }
+            }
+        }
+        if (headscaleRoutePresent && patterns.isEmpty()) {
+            throw new IllegalStateException("pki tier '" + applicationName + "': route '"
+                    + HEADSCALE_ROUTE_ID + "' exists but no Host pattern can be derived from it; "
+                    + "refusing to start with the headscale control plane ungated "
+                    + "(decision 79, hugmesh-admin-bff-api#57)");
+        }
+        return List.copyOf(new ArrayList<>(patterns));
+    }
+
+    /** The derived headscale Host patterns (empty = gate off). Read-only view for
+     *  tests and diagnostics. */
+    public List<String> headscaleHostPatterns() {
+        return headscaleHostPatterns;
+    }
+
+    /** Same matcher shape Spring Cloud Gateway's {@code HostRoutePredicateFactory}
+     *  uses ({@code AntPathMatcher} with {@code .} as the separator), made
+     *  case-insensitive. */
+    private static final AntPathMatcher HOST_MATCHER = hostMatcher();
+
+    private static AntPathMatcher hostMatcher() {
+        AntPathMatcher m = new AntPathMatcher(".");
+        m.setCaseSensitive(false);
+        return m;
+    }
+
+    /**
+     * True iff {@code hostHeader} is on the headscale Host. A SUPERSET of the route
+     * predicate on purpose (this gate may deny more than headscale serves, never
+     * less): SCG's default {@code HostRoutePredicateFactory} matches the RAW
+     * {@code Host} header (port included, case-sensitive); this also tries the
+     * port-stripped form and ignores case and a trailing root dot.
+     */
+    static boolean isHeadscaleHost(List<String> patterns, String hostHeader) {
+        if (patterns == null || patterns.isEmpty() || hostHeader == null) return false;
+        List<String> candidates = new ArrayList<>(2);
+        String raw = hostHeader.trim();
+        candidates.add(raw);
+        candidates.add(stripPortAndRootDot(raw));
+        for (String pattern : patterns) {
+            for (String candidate : candidates) {
+                if (!candidate.isEmpty() && HOST_MATCHER.match(pattern, candidate)) return true;
+            }
+        }
+        return false;
+    }
+
+    private static String stripPortAndRootDot(String host) {
+        String h = host;
+        if (h.startsWith("[")) {                       // IPv6 literal: [::1]:8080
+            int close = h.indexOf(']');
+            h = close > 0 ? h.substring(0, close + 1) : h;
+        } else {
+            int colon = h.lastIndexOf(':');
+            if (colon >= 0 && h.indexOf(':') == colon) h = h.substring(0, colon);
+        }
+        while (h.endsWith(".")) h = h.substring(0, h.length() - 1);
+        return h;
+    }
+
+    private ServerWebExchangeMatcher headscaleHostMatcher() {
+        return exchange -> {
+            Collection<String> hosts = exchange.getRequest().getHeaders().get("Host");
+            if (hosts != null) {
+                for (String host : hosts) {
+                    if (isHeadscaleHost(headscaleHostPatterns, host)) {
+                        return ServerWebExchangeMatcher.MatchResult.match();
+                    }
+                }
+            }
+            // Also the request URI's host (the server derives it from Host, so this
+            // only ever widens the match — never narrows it).
+            String uriHost = exchange.getRequest().getURI().getHost();
+            return isHeadscaleHost(headscaleHostPatterns, uriHost)
+                    ? ServerWebExchangeMatcher.MatchResult.match()
+                    : ServerWebExchangeMatcher.MatchResult.notMatch();
+        };
     }
 
     /** FE-tier detection by instance-name suffix — the SAME derivation
@@ -327,6 +532,14 @@ public class SecurityConfig {
     SecurityWebFilterChain filterChain(ServerHttpSecurity http) {
         return http
                 .authorizeExchange(ex -> {
+                    // PKI tier: the headscale control plane's Host needs
+                    // ROLE_SUPERADMIN for EVERY path (decision 79). FIRST, because
+                    // authorizeExchange is first-match-wins: below PUBLIC_PATHS an
+                    // anonymous /api/auth/** on that Host would be permitted. Off on
+                    // every other tier (empty pattern list). See headscaleHostPatterns.
+                    if (!headscaleHostPatterns.isEmpty()) {
+                        ex.matchers(headscaleHostMatcher()).hasRole("SUPERADMIN");
+                    }
                     ex.pathMatchers(PUBLIC_PATHS).permitAll();
                     // FE front door ONLY: the anonymous SPA shell + the public
                     // federation reads, GET-only. Other tiers (pki/be) and other
