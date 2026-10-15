@@ -608,6 +608,72 @@ class GatewayRouteAccessServiceTest {
                 List.of("ROLE_USER", "ROLE_FLEET_ADMIN"))).isEqualTo(Decision.DENY);
     }
 
+    // ── Workload Console (pods / logs / exec / events) at the fe door ───────────────
+
+    @Test
+    void canonicalSeed_feGateway_workloadConsolePaths_areGovernedByTheBakedAdminAndSuperadminRows() {
+        // WHAT THIS PINS. admin-bff serves the Workload Console at /bff/admin/workloads
+        // and /bff/superadmin/workloads and enforces its own grants behind the door.
+        // No fe row names "workloads": the gateway governs those paths only through the
+        // two prefix rows /bff/admin/** (ROLE_ADMIN) and /bff/superadmin/** (ROLE_SUPERADMIN).
+        // Delete either row and decide() answers NO_RULE, which is a FORWARD on the
+        // coarse authenticated() floor, not a refusal -- so every assertion below
+        // reads NO_RULE instead of DENY/ALLOW and goes red.
+        //
+        // SCOPE. This pins the baked TABLE. GatewayRouteAccessFilter short-circuits
+        // admin/superadmin principals (and anonymous requests) before decide() is
+        // consulted, so these answers are not what a live request experiences; the
+        // short-circuit is unchanged by this test.
+        //
+        // DECISION: no per-sub-path (exec / logs) row is added. A row here could only
+        // repeat ROLE_ADMIN, because the default-blind own-domain grants live in
+        // admin-bff's database, which this layer cannot see.
+        var s = new GatewayRouteAccessService(null, null, "hugmesh-fe-gateway", true, false, null);
+        s.primeForTest(CanonicalSeed.forGateway("hugmesh-fe-gateway"));
+
+        List<String> adminPaths = List.of(
+            "/bff/admin/workloads",
+            "/bff/admin/workloads/pods",
+            "/bff/admin/workloads/pods/p1/logs",
+            "/bff/admin/workloads/pods/p1/exec",
+            "/bff/admin/workloads/events");
+        for (String path : adminPaths) {
+            assertThat(s.decide(path, "default", List.of(), List.of()))
+                .as("anonymous must be DENIED at %s (governed, not NO_RULE)", path)
+                .isEqualTo(Decision.DENY);
+            assertThat(s.decide(path, "default", List.of("u1"), List.of("ROLE_USER")))
+                .as("ROLE_USER must be DENIED at %s", path)
+                .isEqualTo(Decision.DENY);
+            assertThat(s.decide(path, "default", List.of("u1"), List.of("ROLE_USER", "ROLE_FLEET_ADMIN")))
+                .as("the fleet-owner capability must not open %s", path)
+                .isEqualTo(Decision.DENY);
+            assertThat(s.decide(path, "default", List.of("u1"), List.of("ROLE_ADMIN")))
+                .as("ROLE_ADMIN is forwarded at %s; admin-bff owns the per-domain grant", path)
+                .isEqualTo(Decision.ALLOW);
+        }
+
+        List<String> superadminPaths = List.of(
+            "/bff/superadmin/workloads",
+            "/bff/superadmin/workloads/pods",
+            "/bff/superadmin/workloads/pods/p1/logs",
+            "/bff/superadmin/workloads/pods/p1/exec",
+            "/bff/superadmin/workloads/events");
+        for (String path : superadminPaths) {
+            assertThat(s.decide(path, "default", List.of(), List.of()))
+                .as("anonymous must be DENIED at %s (governed, not NO_RULE)", path)
+                .isEqualTo(Decision.DENY);
+            assertThat(s.decide(path, "default", List.of("u1"), List.of("ROLE_USER")))
+                .as("ROLE_USER must be DENIED at %s", path)
+                .isEqualTo(Decision.DENY);
+            assertThat(s.decide(path, "default", List.of("u1"), List.of("ROLE_USER", "ROLE_ADMIN")))
+                .as("plain ROLE_ADMIN must be DENIED at %s", path)
+                .isEqualTo(Decision.DENY);
+            assertThat(s.decide(path, "default", List.of("u1"), List.of("ROLE_SUPERADMIN")))
+                .as("ROLE_SUPERADMIN is forwarded at %s", path)
+                .isEqualTo(Decision.ALLOW);
+        }
+    }
+
     // ── #244 ACCEPT (decision 41): the superadmin platform console at the fe door ─
 
     @Test
