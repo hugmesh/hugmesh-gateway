@@ -1,7 +1,8 @@
 # 002 - POST /bff/register is an authenticated surface (kept closed)
 
-Status: decided 2026-10-15 (operator, on issue #29 / PR #31). Option B of the
-two options the issue offered.
+Status: decided 2026-10-15 by the operator on their decisions page (option B of the
+two options issue #29 offered). The operator's answer carried no written reason; the
+reasoning below is taken from the code, not from a recorded statement.
 
 ## Context
 
@@ -22,7 +23,7 @@ route-access seed rows stay `ROLE_USER`. No gateway behaviour changes.
 
 ## Why
 
-The reason is the operator's, recorded on issue #29. user-bff's register
+The reason, from the code: user-bff's register
 endpoint mints a session for an allow-listed email without any proof that the
 caller owns that address. Opening it to anonymous callers would let anyone who
 knows an invited address obtain a session for it. (That behaviour lives in
