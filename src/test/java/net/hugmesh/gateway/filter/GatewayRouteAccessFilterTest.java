@@ -1041,6 +1041,29 @@ class GatewayRouteAccessFilterTest {
     }
 
     @Test
+    void privilegedFloor_foreignBrandSuperadminLackingMfa_stillGetsTheSignal_jwt() {
+        // SUPERADMIN is the cross-domain bypass: after MFA it WOULD get through on any
+        // brand's Host, so unlike a foreign-brand admin the challenge can help.
+        filter = multiBrandFloorFilter(realServiceWithMfaRequiredAdminRow());
+        Jwt saJwt = jwt("sa-x", List.of(Map.of("name", "superadmin")), BRANDX_ISSUER);
+        MockServerWebExchange mwex = run("/api/admin/secrets", "api.brandy.tld",
+                authForDomain(saJwt, "brandx", "SUPERADMIN"));
+        assertThat(downstreamCalled).isFalse();
+        assertThat(mwex.getResponse().getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
+        assertThat(mwex.getResponse().getHeaders().getFirst(SIGNAL)).isEqualTo("X-Mfa-StepUp");
+    }
+
+    @Test
+    void bffSessionFloor_foreignBrandSuperadminLackingMfa_stillGetsTheSignal() {
+        filter = multiBrandFloorFilter(realServiceWithMfaRequiredAdminRow());
+        MockServerWebExchange mwex = run("/api/admin/secrets", "api.brandy.tld",
+                bffSessionWithDomain("sa-1", "brandx", "SUPERADMIN"));
+        assertThat(downstreamCalled).isFalse();
+        assertThat(mwex.getResponse().getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
+        assertThat(mwex.getResponse().getHeaders().getFirst(SIGNAL)).isEqualTo("X-Mfa-StepUp");
+    }
+
+    @Test
     void privilegedFloor_adminOnTheTubeAdminRow_isTheRealWorldCase() {
         // The tube rows only matter to ADMIN through the floor: ADMIN bypasses decide().
         var svc = new GatewayRouteAccessService(null, null, "hugmesh-fe-gateway", true, false, null);
