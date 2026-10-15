@@ -1909,6 +1909,44 @@ class GatewayRouteAccessServiceTest {
         assertThat(s.isMfaRequiredSurface("/nope/here", "default")).isFalse();
     }
 
+    @Test
+    void isMfaStepUpDenial_trueOnlyWhenTheSoleMissingPieceIsMfa() {
+        var s = svcMfaOn(
+                rule("/api/x/**", "ROLE_USER", null, true),
+                mfaRule("/api/x/**", "ROLE_ADMIN"),
+                rule("/api/banned/**", "ROLE_USER", null, false),
+                mfaRule("/api/sudo/**", "ROLE_USER"));
+        // Held mfa_required grant, no marker: DENY, and MFA is the only thing missing.
+        assertThat(s.isMfaStepUpDenial("/api/x/go", "default", List.of(), List.of("ROLE_ADMIN")))
+            .as("granted by an mfa_required row, marker absent").isTrue();
+        // Marker present: allowed, so not a denial at all.
+        assertThat(s.isMfaStepUpDenial("/api/x/go", "default", List.of(), List.of("ROLE_ADMIN", MFA)))
+            .as("marker present -> ALLOW -> not an MFA denial").isFalse();
+        // Role not held on a governed path: DENY, but MFA could not help.
+        assertThat(s.decide("/api/sudo/run", "default", List.of(), List.of("ROLE_GUEST")))
+            .isEqualTo(Decision.DENY);
+        assertThat(s.isMfaStepUpDenial("/api/sudo/run", "default", List.of(), List.of("ROLE_GUEST")))
+            .as("ungranted principal: a challenge could not let them through").isFalse();
+        // Explicit deny: DENY, MFA could not help.
+        assertThat(s.isMfaStepUpDenial("/api/banned/x", "default", List.of(), List.of("ROLE_USER", "MFA_SATISFIED")))
+            .as("explicit deny wins").isFalse();
+        assertThat(s.isMfaStepUpDenial("/api/banned/x", "default", List.of(), List.of("ROLE_USER")))
+            .as("explicit deny without marker is still not an MFA denial").isFalse();
+        // Ungoverned path and null path.
+        assertThat(s.isMfaStepUpDenial("/nope", "default", List.of(), List.of("ROLE_USER"))).isFalse();
+        assertThat(s.isMfaStepUpDenial(null, "default", List.of(), List.of("ROLE_USER"))).isFalse();
+    }
+
+    @Test
+    void isMfaStepUpDenial_falseWhileTheMfaFlagIsDark() {
+        // app.mfa.enabled=false: the mfa_required column is inert, so the request is
+        // allowed and nothing is an MFA denial (fail closed: the signal is never invented).
+        var s = svc(mfaRule("/api/sudo/**", "ROLE_USER"));
+        assertThat(s.decide("/api/sudo/run", "default", List.of(), List.of("ROLE_USER")))
+            .isEqualTo(Decision.ALLOW);
+        assertThat(s.isMfaStepUpDenial("/api/sudo/run", "default", List.of(), List.of("ROLE_USER"))).isFalse();
+    }
+
     // ── DECISION 56 — the declared MFA-required set on the baked floor ──────────
     // hugmesh-generator#347, operator answer 2026-09-18: "a declared set of
     // privileged rows". See CanonicalSeed.MFA_REQUIRED_FALLBACK_ROWS for the full
