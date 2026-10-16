@@ -1,24 +1,22 @@
 # Gateway docs index
 
-This `docs/` tree is the repo's "wiki" (the platform doesn't use GitHub's
-built-in wiki feature — per-repo docs live here instead). Start with the
-top-level [`README.md`](../README.md) (what the gateway does, current state,
-architecture, configuration) and [`ROADMAP.md`](../ROADMAP.md) (what's shipped
-vs. still to build); the pages below are deeper dives that the top-level docs
-link out to.
+This `docs/` tree is the repo's wiki. The platform does not use GitHub's built-in
+wiki; each repo keeps its docs beside its code. Start with the top-level
+[`README.md`](../README.md) (what the gateway does, current state, architecture,
+configuration) and [`ROADMAP.md`](../ROADMAP.md) (what is built, what is not). The
+pages below go deeper.
 
 ## Pages
 
 - [`decisions/001-cert-chain-hierarchy.md`](decisions/001-cert-chain-hierarchy.md)
-  — ADR: why the platform's PKI is rooted at a single `hugmesh.net`
-  root with per-stack/per-brand intermediates, and how
+  — ADR: why the platform's PKI has one `hugmesh.net` root with per-stack and
+  per-brand intermediates, and how
   [`scripts/pki/build-chained-cert.sh`](../scripts/pki/build-chained-cert.sh)
-  (which lives in this repo) implements it.
+  (in this repo) builds the chain.
 - [`decisions/002-bff-register-authenticated.md`](decisions/002-bff-register-authenticated.md)
   — ADR: `POST /bff/register` and `/bff/register/**` are cookie-authenticated
   (kept out of `PUBLIC_PATHS`), why, and which tests guard it.
 - [`testing/MULTI-ISSUER-SLICE.md`](testing/MULTI-ISSUER-SLICE.md) — the
-  reusable multi-issuer security-slice test pattern (`TestIssuer` +
-  `SecuritySliceSupport`, under `src/test/.../testsupport` and
-  `src/test/.../config`) built first in this repo and meant to be replicated
-  verbatim across the other HugMesh resource-server repos.
+  multi-issuer security-slice test pattern (`TestIssuer` and `SecuritySliceSupport`,
+  under `src/test/.../testsupport` and `src/test/.../config`). It was built here
+  first; ten other resource-server repos now have a copy.
