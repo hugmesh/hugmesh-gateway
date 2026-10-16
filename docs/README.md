@@ -14,6 +14,9 @@ link out to.
   root with per-stack/per-brand intermediates, and how
   [`scripts/pki/build-chained-cert.sh`](../scripts/pki/build-chained-cert.sh)
   (which lives in this repo) implements it.
+- [`decisions/002-bff-register-authenticated.md`](decisions/002-bff-register-authenticated.md)
+  — ADR: `POST /bff/register` and `/bff/register/**` are cookie-authenticated
+  (kept out of `PUBLIC_PATHS`), why, and which tests guard it.
 - [`testing/MULTI-ISSUER-SLICE.md`](testing/MULTI-ISSUER-SLICE.md) — the
   reusable multi-issuer security-slice test pattern (`TestIssuer` +
   `SecuritySliceSupport`, under `src/test/.../testsupport` and
