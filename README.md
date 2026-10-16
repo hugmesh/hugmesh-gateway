@@ -327,6 +327,16 @@ so `/api/admin/**=ROLE_ADMIN` overrides a broader `/api/**=ROLE_USER`:
 - a granting row with `mfa_required` set, when `app.mfa.enabled` is on, is a **403**
   unless the principal holds `MFA_SATISFIED`.
 
+When the denial is an MFA step-up (the privileged MFA floor on either carrier, or
+a granting `mfa_required` row whose only missing piece is `MFA_SATISFIED`), the
+same **403** also carries `X-Step-Up-Required: X-Mfa-StepUp` so a console can tell
+a step-up from a role denial. A role denial, an explicit deny, an ungranted
+governed path, and a foreign-brand admin on the floor (completing MFA could not
+let them through; SUPERADMIN is exempt from that carve-out) stay the bare reject.
+The floor sends it only under `app.mfa.enforce-privileged-floor` and the row gate
+only under `app.mfa.enabled`; both ship off, so nothing changes until an operator
+turns them on.
+
 ## Multi-tenancy / domain scoping
 
 The platform is multi-brand and multi-tenant: one Casdoor per brand, so each brand has

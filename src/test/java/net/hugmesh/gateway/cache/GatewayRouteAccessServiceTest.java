@@ -608,6 +608,72 @@ class GatewayRouteAccessServiceTest {
                 List.of("ROLE_USER", "ROLE_FLEET_ADMIN"))).isEqualTo(Decision.DENY);
     }
 
+    // ── Workload Console (pods / logs / exec / events) at the fe door ───────────────
+
+    @Test
+    void canonicalSeed_feGateway_workloadConsolePaths_areGovernedByTheBakedAdminAndSuperadminRows() {
+        // WHAT THIS PINS. admin-bff serves the Workload Console at /bff/admin/workloads
+        // and /bff/superadmin/workloads and enforces its own grants behind the door.
+        // No fe row names "workloads": the gateway governs those paths only through the
+        // two prefix rows /bff/admin/** (ROLE_ADMIN) and /bff/superadmin/** (ROLE_SUPERADMIN).
+        // Delete either row and decide() answers NO_RULE, which is a FORWARD on the
+        // coarse authenticated() floor, not a refusal -- so every assertion below
+        // reads NO_RULE instead of DENY/ALLOW and goes red.
+        //
+        // SCOPE. This pins the baked TABLE. GatewayRouteAccessFilter short-circuits
+        // admin/superadmin principals (and anonymous requests) before decide() is
+        // consulted, so these answers are not what a live request experiences; the
+        // short-circuit is unchanged by this test.
+        //
+        // DECISION: no per-sub-path (exec / logs) row is added. A row here could only
+        // repeat ROLE_ADMIN, because the default-blind own-domain grants live in
+        // admin-bff's database, which this layer cannot see.
+        var s = new GatewayRouteAccessService(null, null, "hugmesh-fe-gateway", true, false, null);
+        s.primeForTest(CanonicalSeed.forGateway("hugmesh-fe-gateway"));
+
+        List<String> adminPaths = List.of(
+            "/bff/admin/workloads",
+            "/bff/admin/workloads/pods",
+            "/bff/admin/workloads/pods/p1/logs",
+            "/bff/admin/workloads/pods/p1/exec",
+            "/bff/admin/workloads/events");
+        for (String path : adminPaths) {
+            assertThat(s.decide(path, "default", List.of(), List.of()))
+                .as("anonymous must be DENIED at %s (governed, not NO_RULE)", path)
+                .isEqualTo(Decision.DENY);
+            assertThat(s.decide(path, "default", List.of("u1"), List.of("ROLE_USER")))
+                .as("ROLE_USER must be DENIED at %s", path)
+                .isEqualTo(Decision.DENY);
+            assertThat(s.decide(path, "default", List.of("u1"), List.of("ROLE_USER", "ROLE_FLEET_ADMIN")))
+                .as("the fleet-owner capability must not open %s", path)
+                .isEqualTo(Decision.DENY);
+            assertThat(s.decide(path, "default", List.of("u1"), List.of("ROLE_ADMIN")))
+                .as("ROLE_ADMIN is forwarded at %s; admin-bff owns the per-domain grant", path)
+                .isEqualTo(Decision.ALLOW);
+        }
+
+        List<String> superadminPaths = List.of(
+            "/bff/superadmin/workloads",
+            "/bff/superadmin/workloads/pods",
+            "/bff/superadmin/workloads/pods/p1/logs",
+            "/bff/superadmin/workloads/pods/p1/exec",
+            "/bff/superadmin/workloads/events");
+        for (String path : superadminPaths) {
+            assertThat(s.decide(path, "default", List.of(), List.of()))
+                .as("anonymous must be DENIED at %s (governed, not NO_RULE)", path)
+                .isEqualTo(Decision.DENY);
+            assertThat(s.decide(path, "default", List.of("u1"), List.of("ROLE_USER")))
+                .as("ROLE_USER must be DENIED at %s", path)
+                .isEqualTo(Decision.DENY);
+            assertThat(s.decide(path, "default", List.of("u1"), List.of("ROLE_USER", "ROLE_ADMIN")))
+                .as("plain ROLE_ADMIN must be DENIED at %s", path)
+                .isEqualTo(Decision.DENY);
+            assertThat(s.decide(path, "default", List.of("u1"), List.of("ROLE_SUPERADMIN")))
+                .as("ROLE_SUPERADMIN is forwarded at %s", path)
+                .isEqualTo(Decision.ALLOW);
+        }
+    }
+
     // ── #244 ACCEPT (decision 41): the superadmin platform console at the fe door ─
 
     @Test
@@ -798,6 +864,46 @@ class GatewayRouteAccessServiceTest {
         // (provisioning is a post-login, session-bearing step, not an anonymous one).
         assertThat(s.decide("/bff/register/start", "default", List.of(), List.of()))
             .isEqualTo(Decision.DENY);
+    }
+
+    @Test
+    void bffRegister_isAnAuthenticatedSurface_exactAndSubtree_inBothSeeds() {
+        // Issue #29, decision "document register as an authenticated surface, keep
+        // it closed" (docs/decisions/002-bff-register-authenticated.md). user-bff's
+        // register mints a session for an allow-listed email without proof of
+        // ownership, so /bff/register must NEVER be anonymous at the route-access
+        // layer. The existing /bff/register/start assertion in
+        // canonicalSeed_feGateway_nativeLoginSurfacesAreAnonymous covers the
+        // subtree; this pins the EXACT path (the one user-bff serves) and the rows
+        // themselves, for the baked seed AND the compose Postgres seed (which
+        // REPLACES the baked seed wholesale when it loads).
+        var composeFe = composeSeedRulesFor(CanonicalSeed.FE);
+        var seeds = java.util.Map.of(
+                "CanonicalSeed.fe", CanonicalSeed.forGateway(CanonicalSeed.FE),
+                "compose/route-access-seed.sql", composeFe);
+        for (var e : seeds.entrySet()) {
+            var rules = e.getValue();
+            assertThat(rules.stream().filter(r -> r.urlPattern().startsWith("/bff/register")).toList())
+                .as("%s must still carry a /bff/register row (a deleted row would make the "
+                        + "PUBLIC check below vacuous)", e.getKey())
+                .isNotEmpty();
+            assertThat(rules.stream()
+                    .filter(r -> r.urlPattern().startsWith("/bff/register"))
+                    .filter(r -> "PUBLIC".equals(r.role()))
+                    .map(Rule::urlPattern).toList())
+                .as("%s must not seed /bff/register PUBLIC", e.getKey())
+                .isEmpty();
+
+            var s = new GatewayRouteAccessService(null, null, "hugmesh-fe-gateway", true, false, null);
+            s.primeForTest(rules);
+            for (String path : List.of("/bff/register", "/bff/register/start", "/bff/register/complete",
+                    "/bff/register/google", "/bff/register/discord")) {
+                assertThat(s.decide(path, "default", List.of(), List.of()))
+                    .as("%s: anonymous %s", e.getKey(), path).isEqualTo(Decision.DENY);
+                assertThat(s.decide(path, "default", List.of("u1"), List.of("ROLE_USER")))
+                    .as("%s: ROLE_USER %s", e.getKey(), path).isEqualTo(Decision.ALLOW);
+            }
+        }
     }
 
     @Test
@@ -1841,6 +1947,44 @@ class GatewayRouteAccessServiceTest {
         assertThat(s.isMfaRequiredSurface("/api/open/op", "default")).isFalse();
         // Ungoverned path -> no floor.
         assertThat(s.isMfaRequiredSurface("/nope/here", "default")).isFalse();
+    }
+
+    @Test
+    void isMfaStepUpDenial_trueOnlyWhenTheSoleMissingPieceIsMfa() {
+        var s = svcMfaOn(
+                rule("/api/x/**", "ROLE_USER", null, true),
+                mfaRule("/api/x/**", "ROLE_ADMIN"),
+                rule("/api/banned/**", "ROLE_USER", null, false),
+                mfaRule("/api/sudo/**", "ROLE_USER"));
+        // Held mfa_required grant, no marker: DENY, and MFA is the only thing missing.
+        assertThat(s.isMfaStepUpDenial("/api/x/go", "default", List.of(), List.of("ROLE_ADMIN")))
+            .as("granted by an mfa_required row, marker absent").isTrue();
+        // Marker present: allowed, so not a denial at all.
+        assertThat(s.isMfaStepUpDenial("/api/x/go", "default", List.of(), List.of("ROLE_ADMIN", MFA)))
+            .as("marker present -> ALLOW -> not an MFA denial").isFalse();
+        // Role not held on a governed path: DENY, but MFA could not help.
+        assertThat(s.decide("/api/sudo/run", "default", List.of(), List.of("ROLE_GUEST")))
+            .isEqualTo(Decision.DENY);
+        assertThat(s.isMfaStepUpDenial("/api/sudo/run", "default", List.of(), List.of("ROLE_GUEST")))
+            .as("ungranted principal: a challenge could not let them through").isFalse();
+        // Explicit deny: DENY, MFA could not help.
+        assertThat(s.isMfaStepUpDenial("/api/banned/x", "default", List.of(), List.of("ROLE_USER", "MFA_SATISFIED")))
+            .as("explicit deny wins").isFalse();
+        assertThat(s.isMfaStepUpDenial("/api/banned/x", "default", List.of(), List.of("ROLE_USER")))
+            .as("explicit deny without marker is still not an MFA denial").isFalse();
+        // Ungoverned path and null path.
+        assertThat(s.isMfaStepUpDenial("/nope", "default", List.of(), List.of("ROLE_USER"))).isFalse();
+        assertThat(s.isMfaStepUpDenial(null, "default", List.of(), List.of("ROLE_USER"))).isFalse();
+    }
+
+    @Test
+    void isMfaStepUpDenial_falseWhileTheMfaFlagIsDark() {
+        // app.mfa.enabled=false: the mfa_required column is inert, so the request is
+        // allowed and nothing is an MFA denial (fail closed: the signal is never invented).
+        var s = svc(mfaRule("/api/sudo/**", "ROLE_USER"));
+        assertThat(s.decide("/api/sudo/run", "default", List.of(), List.of("ROLE_USER")))
+            .isEqualTo(Decision.ALLOW);
+        assertThat(s.isMfaStepUpDenial("/api/sudo/run", "default", List.of(), List.of("ROLE_USER"))).isFalse();
     }
 
     // ── DECISION 56 — the declared MFA-required set on the baked floor ──────────

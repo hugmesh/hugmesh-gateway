@@ -171,7 +171,32 @@ public class GatewayRouteAccessService {
     public Decision decide(String path, String targetDomain,
                            Collection<String> userIdentifiers,
                            Collection<String> authorities) {
-        if (path == null) return Decision.NO_RULE;
+        Outcome o = evaluate(path, targetDomain, userIdentifiers, authorities);
+        return o == Outcome.DENY_MFA ? Decision.DENY : Decision.valueOf(o.name());
+    }
+
+    /**
+     * True iff {@link #decide} DENIES this request and the ONLY thing missing is a
+     * fresh second factor: the principal is otherwise granted by a deciding
+     * {@code mfa_required} row (no explicit deny, a granting rule is held) but lacks
+     * {@code MFA_SATISFIED}. A role denial, an explicit deny, an ungranted governed
+     * path and every non-DENY outcome answer {@code false} — so a caller who cannot be
+     * helped by an MFA challenge is never told to start one. Same evaluation as
+     * {@link #decide}, never a second rule walk with its own semantics.
+     */
+    public boolean isMfaStepUpDenial(String path, String targetDomain,
+                                     Collection<String> userIdentifiers,
+                                     Collection<String> authorities) {
+        return evaluate(path, targetDomain, userIdentifiers, authorities) == Outcome.DENY_MFA;
+    }
+
+    /** {@link Decision} plus the one deny flavour a client can fix by satisfying MFA. */
+    private enum Outcome { ALLOW, DENY, DENY_MFA, NO_RULE }
+
+    private Outcome evaluate(String path, String targetDomain,
+                             Collection<String> userIdentifiers,
+                             Collection<String> authorities) {
+        if (path == null) return Outcome.NO_RULE;
         List<Rule> snapshot = rules;
 
         // 1) Find the longest url_pattern that matches the path. The most
@@ -182,7 +207,7 @@ public class GatewayRouteAccessService {
             int len = r.urlPattern().length();
             if (len > bestLen) bestLen = len;
         }
-        if (bestLen < 0) return Decision.NO_RULE;   // ungoverned path
+        if (bestLen < 0) return Outcome.NO_RULE;   // ungoverned path
 
         // 2) Among the rules at that longest pattern, apply deny-wins over the
         //    principal's held authorities (respecting the casdoor_user pin AND the
@@ -215,16 +240,16 @@ public class GatewayRouteAccessService {
                 explicitDeny = true;
             }
         }
-        if (explicitDeny) return Decision.DENY;
-        if (!allowed) return Decision.DENY;                // governed-but-ungranted ⇒ deny
+        if (explicitDeny) return Outcome.DENY;
+        if (!allowed) return Outcome.DENY;                // governed-but-ungranted ⇒ deny
         // D8 fail-closed: a deciding grant that demands MFA but the principal lacks
         // the MFA_SATISFIED marker is DENIED (absent marker => not satisfied; a
         // client_credentials / no-MFA / stale-stamp principal never carries it).
         if (mfaRequiredOnGrant
                 && (authorities == null || !authorities.contains(net.hugmesh.gateway.security.Roles.MFA_SATISFIED))) {
-            return Decision.DENY;
+            return Outcome.DENY_MFA;
         }
-        return Decision.ALLOW;
+        return Outcome.ALLOW;
     }
 
     /**
