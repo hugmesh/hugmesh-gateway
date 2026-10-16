@@ -17,6 +17,7 @@ import org.springframework.web.server.WebFilterChain;
 import reactor.core.publisher.Mono;
 import net.hugmesh.gateway.cache.GatewayRouteAccessService;
 import net.hugmesh.gateway.cache.GatewayRouteAccessService.Decision;
+import net.hugmesh.gateway.security.CanonicalPath;
 import net.hugmesh.gateway.security.DomainRegistry;
 import net.hugmesh.gateway.security.Roles;
 
@@ -235,7 +236,21 @@ public class GatewayRouteAccessFilter implements WebFilter, Ordered {
         // brand this is. (The Host header is not touched by the X-Domain strip.)
         final String requestDomain = targetDomain(inbound);
         final ServerWebExchange exchange = normalizeDomainHeader(inbound, requestDomain);
+        // `path` is the RAW (still percent-encoded) request path and is used ONLY for the
+        // log line and the X-Route-Denied header. Every MATCH below runs on `matchPath`,
+        // the canonical decoded form the router itself routes on (see CanonicalPath): the
+        // table's patterns are written decoded, so matching them against the raw string let
+        // /bff/mesh/%69nternal/x slip past a /bff/mesh/internal/** deny as NO_RULE (which
+        // forwards) while the router still decoded it and reached the same handler.
         String path = exchange.getRequest().getPath().value();
+        Optional<String> canonical = CanonicalPath.of(exchange.getRequest());
+        if (canonical.isEmpty()) {
+            // A path a downstream could read differently (double encoding, %2f, %5c, NUL,
+            // malformed escape, ../ above the root) has no single meaning to authorize.
+            // Refused for EVERY caller, before the anonymous fast-path and both bypasses.
+            return rejectAmbiguousPath(exchange, path);
+        }
+        final String matchPath = canonical.get();
         if (requestDomain == null) {
             // UNREGISTERED ONION (hugmesh-gateway#38). The registry answers null
             // only for a `.onion` Host no entry maps while ONION tenancy is
@@ -299,7 +314,7 @@ public class GatewayRouteAccessFilter implements WebFilter, Ordered {
                         boolean privileged = Roles.isSuperadmin(jwt)
                                 || Roles.isAdmin(jwt) || Roles.isGameMaster(jwt);
                         if (privileged
-                                && routeAccess.isMfaRequiredSurface(path, targetDomain)
+                                && routeAccess.isMfaRequiredSurface(matchPath, targetDomain)
                                 && !Roles.isMfaSatisfied(jwt, System.currentTimeMillis(),
                                         mfaFreshnessWindowMillis)) {
                             // The floor runs ABOVE the domain check, so a foreign-brand
@@ -376,7 +391,7 @@ public class GatewayRouteAccessFilter implements WebFilter, Ordered {
                         boolean privileged = Roles.isSuperadmin(authorities)
                                 || Roles.isAdmin(authorities) || Roles.isGameMaster(authorities);
                         if (privileged
-                                && routeAccess.isMfaRequiredSurface(path, targetDomain)
+                                && routeAccess.isMfaRequiredSurface(matchPath, targetDomain)
                                 && !Roles.isMfaSatisfied(authorities)) {
                             // Same reasoning as the Jwt floor: a foreign-brand principal
                             // (multi-issuer only) gets the bare reject, not the signal.
@@ -474,12 +489,12 @@ public class GatewayRouteAccessFilter implements WebFilter, Ordered {
                 for (var ga : auth.getAuthorities()) {
                     if (ga.getAuthority() != null) authorities.add(ga.getAuthority());
                 }
-                if (routeAccess.decide(path, targetDomain, userIds, authorities) == Decision.DENY) {
+                if (routeAccess.decide(matchPath, targetDomain, userIds, authorities) == Decision.DENY) {
                     // A deny whose ONLY missing piece is a fresh second factor carries the
                     // step-up signal; every other deny (role, explicit deny, ungoverned
                     // grant) stays the bare reject so no client offers an MFA challenge
                     // that could not let the caller through.
-                    if (routeAccess.isMfaStepUpDenial(path, targetDomain, userIds, authorities)) {
+                    if (routeAccess.isMfaStepUpDenial(matchPath, targetDomain, userIds, authorities)) {
                         return rejectStepUp(exchange, path);
                     }
                     return reject(exchange, path);
@@ -651,6 +666,17 @@ public class GatewayRouteAccessFilter implements WebFilter, Ordered {
     private Mono<Void> rejectStepUp(ServerWebExchange exchange, String path) {
         exchange.getResponse().getHeaders().set(STEP_UP_SIGNAL_HEADER, STEP_UP_SIGNAL_VALUE);
         return reject(exchange, path);
+    }
+
+    /** 400 for a path with no single meaning ({@link CanonicalPath#of} empty). No
+     *  {@code X-Route-Denied}: this is a malformed request, not a route decision, and it
+     *  is never evaluated against the rule table. The raw path is logged
+     *  percent-encoded (never decoded), so a hostile value cannot forge a log line. */
+    private Mono<Void> rejectAmbiguousPath(ServerWebExchange exchange, String rawPath) {
+        log.warn("[route-access] refused ambiguous path — gateway={} rawPath={}",
+                routeAccess.gatewayName(), rawPath);
+        exchange.getResponse().setStatusCode(HttpStatus.BAD_REQUEST);
+        return exchange.getResponse().setComplete();
     }
 
     /** 403 for an unregistered onion Host — same shape as {@link #reject} (route-access
