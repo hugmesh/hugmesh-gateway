@@ -72,43 +72,43 @@ In concrete terms:
 
 ## Implementation
 
-A reusable cert-chain builder lives at
-[`scripts/pki/build-chained-cert.sh`](../../scripts/pki/build-chained-cert.sh) in this
-repo (the gateway is the natural home — it's the first thing every
-external request hits and the canonical TLS terminator for the
-platform). The script:
+The cert-chain builder is
+[`scripts/pki/build-chained-cert.sh`](../../scripts/pki/build-chained-cert.sh), in
+this repo. The gateway is its natural home: it is the first thing every external
+request hits and the platform's TLS terminator. The script:
 
-1. Reads the hugmesh.net intermediate (`--root-ca` flag).
-2. Generates a new per-stack/per-brand intermediate signed by that root.
+1. Reads the hugmesh.net root certificate and key (`--root-ca`, `--root-key`).
+2. Generates one new per-stack/per-brand intermediate (named by `--stack`) signed by that root.
 3. Mints leaf certs (server + mTLS client) signed by the intermediate.
 4. Emits a single `fullchain.pem` (leaf + intermediate, root excluded
-   per RFC 5246 — TLS clients should trust the root, not get it from
-   the server).
-5. Emits a `truststore.p12` containing the root + intermediate for
+   per RFC 5246). TLS clients should trust the root, not get it from
+   the server.
+5. Emits a `truststore.p12` with the root and the intermediate, for
    Java services that need both.
 
-A consuming stack's existing `scripts/gen-certs.sh` is
-updated in a follow-up PR (see below) to call this script when
-`CERT_CHAIN_MODE=chained` is set in the deploy env, falling back to
-the existing self-signed flow otherwise.
+The script runs `openssl` and `keytool` inside short-lived Docker containers
+(`alpine:3.20`, `eclipse-temurin:21-jre`), so the host needs only Docker. It
+skips generation when `intermediate.crt` and `truststore.p12` already exist in
+the output directory.
+
+A follow-up PR (see below) was to update each consuming stack's
+`scripts/gen-certs.sh` to call this script when `CERT_CHAIN_MODE=chained` is set
+in the deploy env, and to fall back to the self-signed flow otherwise.
 
 ## Operational consequences
 
 - **Cert rotation**: rotating a stack/brand intermediate
-  doesn't require the hugmesh.net root to be touched.
-  Rotating the root requires a coordinated multi-stack rollout — but
-  that's a once-every-N-years event and the trust bundle is the
-  same shape across all stacks.
-- **mTLS between stacks**: a downstream stack's BFF can present its
-  mTLS client cert to a hugmesh.net service and the receiving
-  side validates the chain through the shared root automatically.
-  No manual truststore appends.
-- **CT logging**: production leaf certs intended for a stack's public
-  hostnames on the public internet still need to come from a
-  publicly-trusted CA (Let's Encrypt or similar). The HugMesh-rooted
-  chain is the INTERNAL trust hierarchy for service-to-service comms;
-  the public edge cert is separate and lives in front of the gateway
-  (each stack's `frontend/nginx-tls.conf` mount stays as-is).
+  does not touch the hugmesh.net root.
+  Rotating the root needs a coordinated multi-stack rollout. That happens once
+  every few years, and the trust bundle has the same shape in every stack.
+- **mTLS between stacks**: a downstream stack's BFF presents its
+  mTLS client cert to a hugmesh.net service, and the receiving
+  side validates the chain through the shared root. No manual truststore appends.
+- **CT logging**: production leaf certs for a stack's public
+  hostnames still come from a publicly trusted CA (Let's Encrypt or similar).
+  The HugMesh-rooted chain is the INTERNAL trust hierarchy for service-to-service
+  traffic. The public edge cert is separate and sits in front of the gateway
+  (each stack's `frontend/nginx-tls.conf` mount stays as it is).
 
 ## Follow-up PRs
 
@@ -119,3 +119,13 @@ the existing self-signed flow otherwise.
   cadence.
 - **All Spring services** — switch truststore generation to consume
   the shared bundle instead of importing one CA per stack.
+
+## Status (checked 2026-10-07)
+
+The builder script exists. The first follow-up does not: a search of `origin/main`
+in every local `hugmesh-*` checkout for `CERT_CHAIN_MODE`, `chain-from` and
+`HUGMESH_SYSTEMS_INTERMEDIATE_PATH` finds this file alone. The dev/e2e script that
+exists is `tests/stack/gen-certs.sh` in `hugmesh-generator`. It makes one
+self-signed CA and has no chained mode. This repo has no `scripts/gen-certs.sh`.
+The other two follow-ups (the signed-intermediate release pipeline and the shared
+truststore) were not checked.
