@@ -52,10 +52,10 @@ work. Each maps to source in this repo.
 ## Remaining work — separate branches / PRs / repos
 
 The numbers follow the original design brief. Each item is a discrete deliverable.
-Cross-repo items name their target repo(s). Items 3 and 6 are done and stay here
+Cross-repo items name their target repo(s). Items 3, 6 and 7 are done and stay here
 so the numbers hold. Items 1, 2, 8, 9, 10 and 11 are plans, and nobody re-checked
-them against the other repos on 2026-10-07. Items 5 and 7 were checked, and parts of
-them exist in `hugmesh-games` (see each item).
+them against the other repos on 2026-10-07. Item 5 was checked, and part of it
+exists in `hugmesh-games` (see the item).
 
 ### 1. Per-instance deployment config — same image, different name 🔭
 
@@ -125,22 +125,25 @@ them exist in `hugmesh-games` (see each item).
 - **Acceptance**: integration tests stub GitHub's `/user/repos` + `/user/orgs` and
   assert the grant fires (see that repo's test suite).
 
-### 7. Banned-user remote module 🔭 (built in `hugmesh-games`)
+### 7. Banned-user landing ✅ (shipped as the login-ui appeal flow)
 
-- **Found 2026-10-07**: `hugmesh-games` (`frontend/projects/banned`) has a `banned`
-  remote. It shows the revocation reason and key and a pre-filled appeal email, and it
-  is mounted at `/_remotes/banned/**` by that repo's `frontend/nginx.conf`. Whether the
-  platform front door serves it was not checked. `hugmesh-login-ui` has its own
-  `/login/appeal` page, fed by `GET /bff/public/appeal-contact`.
-
-- **Repo**: the platform front-end (`/_remotes/banned/**`).
-- **Work**: when the gateway denies a revoked or banned principal, the host shell
-  routes to this remote — a "contact a mod/admin" page that fills in the user's
-  Casdoor id and revocation key. `SecurityConfig` **already (✅ shipped)** permits
-  `/_remotes/banned/**` for unauthenticated traffic, so a logged-out banned user
-  can still read it.
-- **Acceptance**: a BDD scenario — log in, an admin posts a revocation, the user's
-  next request lands on `/banned` with the right copy.
+- **Repos**: `hugmesh-login-ui` (the `/login/appeal` page), `hugmesh-admin-bff-api`
+  (the account-appeal records).
+- **Shipped**: the planned `/_remotes/banned` remote was replaced by an appeal
+  flow. `hugmesh-login-ui` classifies a rejected sign-in (`account_banned` /
+  `account_suspended`) in `src/app/bff.service.ts` and auto-routes the visitor to
+  `/login/appeal` (`src/app/appeal.component.ts`), which shows the anonymous
+  appeal-contact address and lets a still-signed-in curtailed account file a
+  structured appeal. `hugmesh-admin-bff-api` stores those appeals
+  (changelog `250-account-appeals.xml`, `AccountAppeal*` controllers).
+- **Gateway side**: the anonymous `GET /bff/public/appeal-contact` path is in
+  `SecurityConfig` `PUBLIC_PATHS`. `/_remotes/banned/**` is **still** in
+  `PUBLIC_PATHS` (and in `BffSessionProperties` / `application.yml`), but the
+  appeal flow does not go through it. 🔭 **Still open**: decide whether that
+  permit is dead surface to remove, or document why it is kept.
+- **Acceptance**: `hugmesh-login-ui` `e2e/features/auth/login-blocked.feature`
+  covers a blocked sign-in landing on the appeal page, and
+  `e2e/features/auth/appeal-submit.feature` covers the structured submit.
 
 ### 8. Mod/admin contact-registration remote + contact DB 🔭
 
@@ -344,6 +347,6 @@ here.
 The foundation pieces (Casdoor JWT, Cassandra revocation cache, URL registry,
 External-Authorization header, route-access and domain scoping) are the **shared
 dependency** that every later item leans on. They are shipped. The remaining items
-either use one of them directly (the registration and banned remotes, the actions
+either use one of them directly (the registration remote, the actions
 service) or repeat the same pattern in another repo. So each follow-up PR stays
 small and reviewable, and nobody has to land one mega-PR across repos.

@@ -17,6 +17,7 @@ import org.springframework.web.server.WebFilterChain;
 import reactor.core.publisher.Mono;
 import net.hugmesh.gateway.cache.GatewayRouteAccessService;
 import net.hugmesh.gateway.cache.GatewayRouteAccessService.Decision;
+import net.hugmesh.gateway.security.CanonicalPath;
 import net.hugmesh.gateway.security.DomainRegistry;
 import net.hugmesh.gateway.security.Roles;
 
@@ -62,7 +63,10 @@ import java.util.Optional;
  *       current "admin works on the internal token alone" contract is unchanged
  *       within the principal's OWN domain.</li>
  *   <li>{@link Decision#DENY} → 403 + {@code X-Route-Denied: <gateway>:<path>}
- *       (no leak of which rule or subject set caused it). The route-access grant
+ *       (no leak of which rule or subject set caused it). When the ONLY thing missing is
+ *       a fresh second factor (an {@code mfa_required} deciding grant, or the privileged
+ *       MFA floor) the 403 also carries {@code X-Step-Up-Required: X-Mfa-StepUp}, so a
+ *       console can offer the MFA challenge and retry; a role denial never carries it. The route-access grant
  *       is itself domain-scoped (per-row {@code domain} column) for the
  *       multi-brand architecture tier that legitimately serves several brands.</li>
  *   <li>{@link Decision#ALLOW} / {@link Decision#NO_RULE} → forward. NO_RULE
@@ -232,7 +236,21 @@ public class GatewayRouteAccessFilter implements WebFilter, Ordered {
         // brand this is. (The Host header is not touched by the X-Domain strip.)
         final String requestDomain = targetDomain(inbound);
         final ServerWebExchange exchange = normalizeDomainHeader(inbound, requestDomain);
+        // `path` is the RAW (still percent-encoded) request path and is used ONLY for the
+        // log line and the X-Route-Denied header. Every MATCH below runs on `matchPath`,
+        // the canonical decoded form the router itself routes on (see CanonicalPath): the
+        // table's patterns are written decoded, so matching them against the raw string let
+        // /bff/mesh/%69nternal/x slip past a /bff/mesh/internal/** deny as NO_RULE (which
+        // forwards) while the router still decoded it and reached the same handler.
         String path = exchange.getRequest().getPath().value();
+        Optional<String> canonical = CanonicalPath.of(exchange.getRequest());
+        if (canonical.isEmpty()) {
+            // A path a downstream could read differently (double encoding, %2f, %5c, NUL,
+            // malformed escape, ../ above the root) has no single meaning to authorize.
+            // Refused for EVERY caller, before the anonymous fast-path and both bypasses.
+            return rejectAmbiguousPath(exchange, path);
+        }
+        final String matchPath = canonical.get();
         if (requestDomain == null) {
             // UNREGISTERED ONION (hugmesh-gateway#38). The registry answers null
             // only for a `.onion` Host no entry maps while ONION tenancy is
@@ -296,10 +314,16 @@ public class GatewayRouteAccessFilter implements WebFilter, Ordered {
                         boolean privileged = Roles.isSuperadmin(jwt)
                                 || Roles.isAdmin(jwt) || Roles.isGameMaster(jwt);
                         if (privileged
-                                && routeAccess.isMfaRequiredSurface(path, targetDomain)
+                                && routeAccess.isMfaRequiredSurface(matchPath, targetDomain)
                                 && !Roles.isMfaSatisfied(jwt, System.currentTimeMillis(),
                                         mfaFreshnessWindowMillis)) {
-                            return reject(exchange, path);
+                            // The floor runs ABOVE the domain check, so a foreign-brand
+                            // admin lands here too: completing MFA could not let them
+                            // through (the domain hard-deny follows), so they get the
+                            // bare reject. SUPERADMIN is the cross-domain bypass.
+                            boolean mfaCanHelp = Roles.isSuperadmin(jwt)
+                                    || domainMatches(Roles.domainOf(jwt, domainRegistry), targetDomain);
+                            return mfaCanHelp ? rejectStepUp(exchange, path) : reject(exchange, path);
                         }
                     }
                     // SUPERADMIN — the ONLY cross-domain bypass. Reaches every
@@ -367,9 +391,14 @@ public class GatewayRouteAccessFilter implements WebFilter, Ordered {
                         boolean privileged = Roles.isSuperadmin(authorities)
                                 || Roles.isAdmin(authorities) || Roles.isGameMaster(authorities);
                         if (privileged
-                                && routeAccess.isMfaRequiredSurface(path, targetDomain)
+                                && routeAccess.isMfaRequiredSurface(matchPath, targetDomain)
                                 && !Roles.isMfaSatisfied(authorities)) {
-                            return reject(exchange, path);
+                            // Same reasoning as the Jwt floor: a foreign-brand principal
+                            // (multi-issuer only) gets the bare reject, not the signal.
+                            boolean mfaCanHelp = Roles.isSuperadmin(authorities)
+                                    || !domainRegistry.isMultiIssuer()
+                                    || domainMatches(Roles.domainOf(authorities), targetDomain);
+                            return mfaCanHelp ? rejectStepUp(exchange, path) : reject(exchange, path);
                         }
                     }
 
@@ -460,7 +489,14 @@ public class GatewayRouteAccessFilter implements WebFilter, Ordered {
                 for (var ga : auth.getAuthorities()) {
                     if (ga.getAuthority() != null) authorities.add(ga.getAuthority());
                 }
-                if (routeAccess.decide(path, targetDomain, userIds, authorities) == Decision.DENY) {
+                if (routeAccess.decide(matchPath, targetDomain, userIds, authorities) == Decision.DENY) {
+                    // A deny whose ONLY missing piece is a fresh second factor carries the
+                    // step-up signal; every other deny (role, explicit deny, ungoverned
+                    // grant) stays the bare reject so no client offers an MFA challenge
+                    // that could not let the caller through.
+                    if (routeAccess.isMfaStepUpDenial(matchPath, targetDomain, userIds, authorities)) {
+                        return rejectStepUp(exchange, path);
+                    }
                     return reject(exchange, path);
                 }
                 // NOTE (issue #4, TODO 2): the X-Domain producer is NOT here. Both
@@ -610,6 +646,36 @@ public class GatewayRouteAccessFilter implements WebFilter, Ordered {
         exchange.getResponse().setStatusCode(HttpStatus.FORBIDDEN);
         exchange.getResponse().getHeaders().add("X-Route-Denied",
                 routeAccess.gatewayName() + ":" + path);
+        return exchange.getResponse().setComplete();
+    }
+
+    /** The structured step-up signal header, byte-identical to admin-bff's
+     *  {@code StepUpRequiredException.SIGNAL_HEADER}. */
+    static final String STEP_UP_SIGNAL_HEADER = "X-Step-Up-Required";
+
+    /** The signal's value. The platform contract is {@code ^X-[A-Za-z0-9-]{1,60}-StepUp$}
+     *  (the name of the request header a token-carrying caller would use). The gateway
+     *  floor has NO token leg: it is satisfied only by a fresh MFA stamp on the caller's
+     *  own session, after which a plain retry passes. The value only names the flavour. */
+    static final String STEP_UP_SIGNAL_VALUE = "X-Mfa-StepUp";
+
+    /** The same 403 + {@code X-Route-Denied} as {@link #reject}, plus
+     *  {@code X-Step-Up-Required}: the caller is refused ONLY for want of a fresh second
+     *  factor. Status is never anything but 403 (not 428), so an old client that does not
+     *  know the header sees exactly the plain reject. */
+    private Mono<Void> rejectStepUp(ServerWebExchange exchange, String path) {
+        exchange.getResponse().getHeaders().set(STEP_UP_SIGNAL_HEADER, STEP_UP_SIGNAL_VALUE);
+        return reject(exchange, path);
+    }
+
+    /** 400 for a path with no single meaning ({@link CanonicalPath#of} empty). No
+     *  {@code X-Route-Denied}: this is a malformed request, not a route decision, and it
+     *  is never evaluated against the rule table. The raw path is logged
+     *  percent-encoded (never decoded), so a hostile value cannot forge a log line. */
+    private Mono<Void> rejectAmbiguousPath(ServerWebExchange exchange, String rawPath) {
+        log.warn("[route-access] refused ambiguous path — gateway={} rawPath={}",
+                routeAccess.gatewayName(), rawPath);
+        exchange.getResponse().setStatusCode(HttpStatus.BAD_REQUEST);
         return exchange.getResponse().setComplete();
     }
 

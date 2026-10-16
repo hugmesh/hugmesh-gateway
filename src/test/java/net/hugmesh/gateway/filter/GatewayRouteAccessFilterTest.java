@@ -971,6 +971,198 @@ class GatewayRouteAccessFilterTest {
         assertThat(downstreamCalled).as("floor flag off -> legacy admin bypass, no MFA gate").isTrue();
     }
 
+    // ── X-Step-Up-Required on an MFA-only denial (tube/wiki step-up, decision 2026-10-15) ──
+    // The signal is emitted ONLY when a fresh second factor is the sole missing piece, and
+    // the status stays 403 with X-Route-Denied. A role denial never carries it.
+
+    private static final String SIGNAL = "X-Step-Up-Required";
+
+    @Test
+    void privilegedFloor_adminLackingMfa_denial_carriesStepUpSignal() {
+        var svc = realServiceWithMfaRequiredAdminRow();
+        GatewayRouteAccessFilter f = floorFilter(svc);
+        Jwt adminJwt = jwtWithMfa("admin-1", List.of(Map.of("name", "admin")), null);
+        var auth = new JwtAuthenticationToken(adminJwt, List.of(
+                new SimpleGrantedAuthority("ROLE_USER"), new SimpleGrantedAuthority("ROLE_ADMIN")));
+        MockServerWebExchange mwex = MockServerWebExchange.from(
+                MockServerHttpRequest.get("/api/admin/secrets").build());
+        f.filter(new ExchangeWithPrincipal(mwex, auth), forwarded).block();
+        assertThat(mwex.getResponse().getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
+        assertThat(mwex.getResponse().getHeaders().getFirst(SIGNAL)).isEqualTo("X-Mfa-StepUp");
+        assertThat(mwex.getResponse().getHeaders().getFirst("X-Route-Denied"))
+            .isEqualTo("hugmesh-be-gateway:/api/admin/secrets");
+    }
+
+    private static GatewayRouteAccessFilter multiBrandFloorFilter(GatewayRouteAccessService svc) {
+        return new GatewayRouteAccessFilter(svc, multiBrandRegistry(), true, 600_000L);
+    }
+
+    @Test
+    void privilegedFloor_foreignBrandAdminLackingMfa_getsBareRejectNotTheSignal() {
+        // The floor sits ABOVE the domain hard-deny, so a brand-X admin presenting brand-Y's
+        // Host lands on it too. Completing MFA could not let them through, so no signal.
+        filter = multiBrandFloorFilter(realServiceWithMfaRequiredAdminRow());
+        Jwt adminJwt = jwt("admin-x", List.of(Map.of("name", "admin")), BRANDX_ISSUER);
+        MockServerWebExchange mwex = run("/api/admin/secrets", "api.brandy.tld",
+                authForDomain(adminJwt, "brandx", "ADMIN"));
+        assertThat(downstreamCalled).isFalse();
+        assertThat(mwex.getResponse().getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
+        assertThat(mwex.getResponse().getHeaders().getFirst("X-Route-Denied")).isNotNull();
+        assertThat(mwex.getResponse().getHeaders().getFirst(SIGNAL)).isNull();
+    }
+
+    @Test
+    void privilegedFloor_ownBrandAdminLackingMfa_getsTheSignalOnMultiBrandGateway() {
+        filter = multiBrandFloorFilter(realServiceWithMfaRequiredAdminRow());
+        Jwt adminJwt = jwt("admin-x", List.of(Map.of("name", "admin")), BRANDX_ISSUER);
+        MockServerWebExchange mwex = run("/api/admin/secrets", "api.brandx.tld",
+                authForDomain(adminJwt, "brandx", "ADMIN"));
+        assertThat(mwex.getResponse().getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
+        assertThat(mwex.getResponse().getHeaders().getFirst(SIGNAL)).isEqualTo("X-Mfa-StepUp");
+    }
+
+    @Test
+    void bffSessionFloor_foreignBrandAdminLackingMfa_getsBareRejectNotTheSignal() {
+        filter = multiBrandFloorFilter(realServiceWithMfaRequiredAdminRow());
+        MockServerWebExchange mwex = run("/api/admin/secrets", "api.brandy.tld",
+                bffSessionWithDomain("a-1", "brandx", "ADMIN"));
+        assertThat(downstreamCalled).isFalse();
+        assertThat(mwex.getResponse().getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
+        assertThat(mwex.getResponse().getHeaders().getFirst(SIGNAL)).isNull();
+    }
+
+    @Test
+    void bffSessionFloor_ownBrandAdminLackingMfa_getsTheSignalOnMultiBrandGateway() {
+        filter = multiBrandFloorFilter(realServiceWithMfaRequiredAdminRow());
+        MockServerWebExchange mwex = run("/api/admin/secrets", "api.brandx.tld",
+                bffSessionWithDomain("a-1", "brandx", "ADMIN"));
+        assertThat(mwex.getResponse().getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
+        assertThat(mwex.getResponse().getHeaders().getFirst(SIGNAL)).isEqualTo("X-Mfa-StepUp");
+    }
+
+    @Test
+    void privilegedFloor_foreignBrandSuperadminLackingMfa_stillGetsTheSignal_jwt() {
+        // SUPERADMIN is the cross-domain bypass: after MFA it WOULD get through on any
+        // brand's Host, so unlike a foreign-brand admin the challenge can help.
+        filter = multiBrandFloorFilter(realServiceWithMfaRequiredAdminRow());
+        Jwt saJwt = jwt("sa-x", List.of(Map.of("name", "superadmin")), BRANDX_ISSUER);
+        MockServerWebExchange mwex = run("/api/admin/secrets", "api.brandy.tld",
+                authForDomain(saJwt, "brandx", "SUPERADMIN"));
+        assertThat(downstreamCalled).isFalse();
+        assertThat(mwex.getResponse().getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
+        assertThat(mwex.getResponse().getHeaders().getFirst(SIGNAL)).isEqualTo("X-Mfa-StepUp");
+    }
+
+    @Test
+    void bffSessionFloor_foreignBrandSuperadminLackingMfa_stillGetsTheSignal() {
+        filter = multiBrandFloorFilter(realServiceWithMfaRequiredAdminRow());
+        MockServerWebExchange mwex = run("/api/admin/secrets", "api.brandy.tld",
+                bffSessionWithDomain("sa-1", "brandx", "SUPERADMIN"));
+        assertThat(downstreamCalled).isFalse();
+        assertThat(mwex.getResponse().getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
+        assertThat(mwex.getResponse().getHeaders().getFirst(SIGNAL)).isEqualTo("X-Mfa-StepUp");
+    }
+
+    @Test
+    void privilegedFloor_adminOnTheTubeAdminRow_isTheRealWorldCase() {
+        // The tube rows only matter to ADMIN through the floor: ADMIN bypasses decide().
+        var svc = new GatewayRouteAccessService(null, null, "hugmesh-fe-gateway", true, false, null);
+        svc.primeForTest(List.of(
+                new GatewayRouteAccessService.Rule("tube", "hugmesh-fe-gateway", "/bff/tube/**",
+                        "ROLE_TUBE", null, true, null, false),
+                new GatewayRouteAccessService.Rule("tube-access", "hugmesh-fe-gateway",
+                        "/bff/tube/admin/access/**", "ROLE_ADMIN", null, true, null, true)));
+        filter = floorFilter(svc);
+        MockServerWebExchange mwex = run("/bff/tube/admin/access/grant", bffSession("casdoor:a1", "ADMIN"));
+        assertThat(downstreamCalled).isFalse();
+        assertThat(mwex.getResponse().getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
+        assertThat(mwex.getResponse().getHeaders().getFirst(SIGNAL)).isEqualTo("X-Mfa-StepUp");
+        // The un-gated tube floor row is untouched: same admin, a non-admin tube path, forwarded.
+        downstreamCalled.set(false);
+        run("/bff/tube/downloads", bffSession("casdoor:a1", "ADMIN"));
+        assertThat(downstreamCalled).isTrue();
+    }
+
+    @Test
+    void bffSessionFloor_superadminLackingMfa_denial_carriesStepUpSignal() {
+        filter = floorFilter(realServiceWithMfaRequiredAdminRow());
+        MockServerWebExchange mwex = run("/api/admin/secrets", bffSession("sa-1", "SUPERADMIN"));
+        assertThat(mwex.getResponse().getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
+        assertThat(mwex.getResponse().getHeaders().getFirst(SIGNAL)).isEqualTo("X-Mfa-StepUp");
+    }
+
+    @Test
+    void decidePath_grantedUserLackingMfa_denial_carriesStepUpSignal() {
+        // Not a privileged role, so the floor is not involved: this is the per-row
+        // mfa_required gate in decide(), with the floor flag at its dark default.
+        var svc = new GatewayRouteAccessService(null, null, "hugmesh-be-gateway", true, true, null);
+        svc.primeForTest(List.of(new GatewayRouteAccessService.Rule(
+                "mfa-tube", "hugmesh-be-gateway", "/bff/tube/admin/access/**",
+                "ROLE_USER", null, true, null, true)));
+        filter = new GatewayRouteAccessFilter(svc,
+                new net.hugmesh.gateway.security.DomainRegistry("http://casdoor:8000", "", ""));
+        MockServerWebExchange mwex = run("/bff/tube/admin/access/grants", bffSession("casdoor:u1"));
+        assertThat(downstreamCalled).isFalse();
+        assertThat(mwex.getResponse().getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
+        assertThat(mwex.getResponse().getHeaders().getFirst(SIGNAL)).isEqualTo("X-Mfa-StepUp");
+    }
+
+    @Test
+    void decidePath_grantedUserWithMfa_isForwarded_noSignal() {
+        var svc = new GatewayRouteAccessService(null, null, "hugmesh-be-gateway", true, true, null);
+        svc.primeForTest(List.of(new GatewayRouteAccessService.Rule(
+                "mfa-tube", "hugmesh-be-gateway", "/bff/tube/admin/access/**",
+                "ROLE_USER", null, true, null, true)));
+        filter = new GatewayRouteAccessFilter(svc,
+                new net.hugmesh.gateway.security.DomainRegistry("http://casdoor:8000", "", ""));
+        var authorities = new ArrayList<GrantedAuthority>();
+        authorities.add(new SimpleGrantedAuthority("ROLE_USER"));
+        authorities.add(new SimpleGrantedAuthority("MFA_SATISFIED"));
+        var auth = new org.springframework.security.authentication.UsernamePasswordAuthenticationToken(
+                "casdoor:u1", null, authorities);
+        MockServerWebExchange mwex = run("/bff/tube/admin/access/grants", auth);
+        assertThat(downstreamCalled).isTrue();
+        assertThat(mwex.getResponse().getHeaders().getFirst(SIGNAL)).isNull();
+    }
+
+    @Test
+    void decidePath_roleDenial_neverCarriesStepUpSignal() {
+        // The caller holds no role the row grants: an MFA challenge could not let them
+        // through, so the 403 is the bare reject with NO signal.
+        var svc = new GatewayRouteAccessService(null, null, "hugmesh-be-gateway", true, true, null);
+        svc.primeForTest(List.of(new GatewayRouteAccessService.Rule(
+                "mfa-tube", "hugmesh-be-gateway", "/bff/tube/admin/access/**",
+                "ROLE_ADMIN", null, true, null, true)));
+        filter = new GatewayRouteAccessFilter(svc,
+                new net.hugmesh.gateway.security.DomainRegistry("http://casdoor:8000", "", ""));
+        MockServerWebExchange mwex = run("/bff/tube/admin/access/grants", bffSession("casdoor:u1"));
+        assertThat(downstreamCalled).isFalse();
+        assertThat(mwex.getResponse().getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
+        assertThat(mwex.getResponse().getHeaders().getFirst("X-Route-Denied")).isNotNull();
+        assertThat(mwex.getResponse().getHeaders().getFirst(SIGNAL)).isNull();
+    }
+
+    @Test
+    void decidePath_mfaFlagDark_noDenialAndNoSignal() {
+        var svc = new GatewayRouteAccessService(null, null, "hugmesh-be-gateway", true, false, null);
+        svc.primeForTest(List.of(new GatewayRouteAccessService.Rule(
+                "mfa-tube", "hugmesh-be-gateway", "/bff/tube/admin/access/**",
+                "ROLE_USER", null, true, null, true)));
+        filter = new GatewayRouteAccessFilter(svc,
+                new net.hugmesh.gateway.security.DomainRegistry("http://casdoor:8000", "", ""));
+        MockServerWebExchange mwex = run("/bff/tube/admin/access/grants", bffSession("casdoor:u1"));
+        assertThat(downstreamCalled).isTrue();
+        assertThat(mwex.getResponse().getHeaders().getFirst(SIGNAL)).isNull();
+    }
+
+    @Test
+    void mockedPlainDeny_carriesNoStepUpSignal() {
+        when(routeAccess.decide(any(), any(), any(), any())).thenReturn(Decision.DENY);
+        MockServerWebExchange mwex = run("/bff/admin/usage", bffSession("m-1", "MOD"));
+        assertThat(mwex.getResponse().getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
+        assertThat(mwex.getResponse().getHeaders().getFirst(SIGNAL)).isNull();
+    }
+
     // ── Inbound X-Domain strip (issue #4, TODO 2 — the half that can land) ───
     //
     // X-Domain is the canonical gateway-stamped brand header. INBOUND it is
