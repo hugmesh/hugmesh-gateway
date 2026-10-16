@@ -12,6 +12,7 @@ import org.springframework.web.server.WebFilter;
 import org.springframework.web.server.WebFilterChain;
 import reactor.core.publisher.Mono;
 import net.hugmesh.gateway.cache.ResourceAuthorizationService;
+import net.hugmesh.gateway.security.CanonicalPath;
 import net.hugmesh.gateway.security.Roles;
 
 import java.util.List;
@@ -83,7 +84,18 @@ public class ResourceAccessFilter implements WebFilter, Ordered {
 
     @Override
     public Mono<Void> filter(ServerWebExchange exchange, WebFilterChain chain) {
-        String path = exchange.getRequest().getPath().value();
+        // Match on the canonical decoded path the router routes on, never the raw string:
+        // /api/%67ames/{slug}/launch would otherwise miss the per-resource grant check and
+        // be forwarded, while the router still decoded it onto the games handler. A path
+        // with no single meaning is refused outright, for every caller.
+        var canonical = CanonicalPath.of(exchange.getRequest());
+        if (canonical.isEmpty()) {
+            log.warn("[resource-access] refused ambiguous path — rawPath={}",
+                    exchange.getRequest().getPath().value());
+            exchange.getResponse().setStatusCode(HttpStatus.BAD_REQUEST);
+            return exchange.getResponse().setComplete();
+        }
+        String path = canonical.get();
 
         ResourceTuple tuple = matchResource(path, exchange);
         if (tuple == null) {

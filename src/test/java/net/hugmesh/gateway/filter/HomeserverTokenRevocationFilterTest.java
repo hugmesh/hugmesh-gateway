@@ -276,9 +276,7 @@ class HomeserverTokenRevocationFilterTest {
             // leaving the discovery exemption by a dot segment
             "/.well-known/../_matrix/client/v3/sync",
             "/.well-known/%2e%2e/_matrix/client/v3/sync",
-            // not the exact discovery path
-            "/_matrix/client/%76ersions",
-            "/_matrix/client/versions/",
+            // climbs out of the discovery path
             "/_matrix/client/versions/../v3/sync",
     })
     void bannedToken_everySpellingOfAMatrixPath_isDenied(String rawPath) {
@@ -346,12 +344,17 @@ class HomeserverTokenRevocationFilterTest {
             "/api;x=1/games/list",
             "/_matrixfoo/x",
             "/apix/v1/timelines/home",
-            // ambiguous but not under a gated prefix, and not nested too deep: not this filter's surface
-            "/api/games/list%00",
     })
     void ungatedPaths_areNotCaughtByTheWiderMatching(String rawPath) {
         // an unrecognised bearer on an ungated path is not this filter's concern
         assertForwarded(bannedAlice(), rawPath, "never-minted");
+    }
+
+    @Test
+    void pathWithNoCanonicalReading_isAdjudicatedEvenOutsideTheGatedPrefixes() {
+        // CanonicalPath gives /api/games/list%00 no reading (route-access refuses it),
+        // so it cannot be shown to be ungated: an unrecognised bearer is refused.
+        assertDenied(bannedAlice(), "/api/games/list%00", "never-minted");
     }
 
     @ParameterizedTest
@@ -359,6 +362,10 @@ class HomeserverTokenRevocationFilterTest {
             "/_matrix/client/versions",
             "/.well-known/matrix/client",
             "/.well-known/matrix/server",
+            // spellings whose single canonical reading is the discovery path (the
+            // reading route-access routes on): the exemption follows that reading
+            "/_matrix/client/%76ersions",
+            "/_matrix/client/versions/",
     })
     void discoveryPaths_stayExemptInTheirPlainSpelling(String rawPath) {
         assertForwarded(bannedAlice(), rawPath, "never-minted");

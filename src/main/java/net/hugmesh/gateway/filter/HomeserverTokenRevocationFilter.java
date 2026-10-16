@@ -13,6 +13,7 @@ import org.springframework.web.server.WebFilterChain;
 import reactor.core.publisher.Mono;
 import net.hugmesh.gateway.cache.RevocationListService;
 import net.hugmesh.gateway.cache.RevocationListService.HsToken;
+import net.hugmesh.gateway.security.CanonicalPath;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -109,14 +110,24 @@ public class HomeserverTokenRevocationFilter implements WebFilter, Ordered {
         // Decide on every spelling a downstream hop could read, not the raw string
         // alone: the router and the homeserver decode the path, so an encoded,
         // dotted, parameterised or re-cased variant of a gated prefix is the same
-        // request. See RequestPathForms.
+        // request. RequestPathForms enumerates the readings; CanonicalPath is the
+        // single reading the route-access layer routes on, and a path it cannot give
+        // one meaning to is adjudicated as gated.
         RequestPathForms forms = RequestPathForms.of(path);
+        var canonical = CanonicalPath.of(exchange.getRequest());
         boolean ambiguous = forms.isAmbiguous();
         // A path nested too deep to read cannot be shown to be OUTSIDE the gated
         // surface, so it is adjudicated like a gated one. Any other ambiguity
         // (encoded NUL, bad UTF-8, malformed escape) only matters on a gated path.
-        boolean adjudicate = isGated(forms) || forms.isNestedTooDeep();
-        if (!adjudicate || (!ambiguous && isDiscoveryExempt(forms))) {
+        boolean adjudicate = isGated(forms) || forms.isNestedTooDeep()
+                || canonical.isEmpty()
+                || RequestPathForms.of(canonical.get()).anyMatches(GATED_PATHS);
+        // Discovery is exempt only when the path has one reading and that reading is
+        // a discovery path: a dot segment or an encoding that climbs out of
+        // /.well-known/** resolves to the gated path it really names.
+        boolean exempt = !ambiguous && !forms.isNestedTooDeep() && canonical.isPresent()
+                && RequestPathForms.of(canonical.get()).allMatch(DISCOVERY_EXEMPT);
+        if (!adjudicate || exempt) {
             return chain.filter(exchange);
         }
 
@@ -180,11 +191,6 @@ public class HomeserverTokenRevocationFilter implements WebFilter, Ordered {
     /** Gated if ANY spelling of the path is under a gated prefix (case-insensitive). */
     private boolean isGated(RequestPathForms forms) {
         return forms.anyMatches(GATED_PATHS);
-    }
-
-    /** Exempt only if EVERY spelling is a discovery path (case-sensitive). */
-    private boolean isDiscoveryExempt(RequestPathForms forms) {
-        return forms.allMatch(DISCOVERY_EXEMPT);
     }
 
     private static String bearerOf(ServerWebExchange exchange) {
