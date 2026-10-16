@@ -4,13 +4,18 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.Ordered;
+import org.springframework.core.io.buffer.DataBuffer;
+import org.springframework.core.io.buffer.DataBufferLimitException;
+import org.springframework.core.io.buffer.DataBufferUtils;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.server.reactive.ServerHttpRequest;
+import org.springframework.http.server.reactive.ServerHttpRequestDecorator;
 import org.springframework.stereotype.Component;
-import org.springframework.util.AntPathMatcher;
 import org.springframework.web.server.ServerWebExchange;
 import org.springframework.web.server.WebFilter;
 import org.springframework.web.server.WebFilterChain;
+import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import net.hugmesh.gateway.cache.RevocationListService;
 import net.hugmesh.gateway.cache.RevocationListService.HsToken;
@@ -20,6 +25,9 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.HexFormat;
+import java.util.List;
+import java.util.Locale;
+import java.util.Optional;
 
 /**
  * Enforces the revocation list against HOMESERVER bearer tokens — the channel the
@@ -50,6 +58,15 @@ import java.util.HexFormat;
  *       clients while the user's {@code kind=brokered} our-UI token keeps working.</li>
  * </ul>
  *
+ * <p><b>Every credential channel.</b> A homeserver can take its bearer from more than
+ * the first {@code Authorization} header: a later header line, an
+ * {@code access_token} query parameter, or (on the Mastodon-API surface) an
+ * {@code access_token} member of a form or JSON body or a
+ * {@code Sec-WebSocket-Protocol} entry on a streaming upgrade. Each one presented is
+ * adjudicated and the request is refused unless every one passes, so a revoked token
+ * cannot ride beside a good one or move to a channel this filter does not read. See
+ * {@link PresentedCredentials}.
+ *
  * <p><b>Fail-CLOSED on the gated paths.</b> Once enabled, a request to a gated
  * path that presents a bearer the gateway cannot resolve (no {@code hs_tokens}
  * row) is DENIED — a token we never recorded a mint for is, by construction, not
@@ -69,7 +86,6 @@ import java.util.HexFormat;
 public class HomeserverTokenRevocationFilter implements WebFilter, Ordered {
 
     private static final Logger log = LoggerFactory.getLogger(HomeserverTokenRevocationFilter.class);
-    private static final AntPathMatcher MATCHER = new AntPathMatcher();
 
     /** The token-bearing homeserver surfaces this filter adjudicates. */
     private static final String[] GATED_PATHS = {
@@ -92,6 +108,19 @@ public class HomeserverTokenRevocationFilter implements WebFilter, Ordered {
             "/.well-known/**",
     };
 
+    /** Gated prefixes whose server parses form / JSON / multipart bodies into the
+     *  same parameter map it reads {@code access_token} from (the Mastodon API). The
+     *  Matrix client-server API takes a token from the header or query only. */
+    private static final String[] BODY_PARAM_PATHS = {
+            "/api/v1/**",
+            "/api/v2/**",
+            "/oauth/**",
+    };
+
+    /** Largest form / JSON body read to look for a token. A larger one on the
+     *  Mastodon-API surface is refused rather than forwarded unread. */
+    static final int MAX_INSPECTED_BODY_BYTES = 1 << 20;
+
     private final RevocationListService revocations;
     private final boolean enabled;
 
@@ -109,38 +138,141 @@ public class HomeserverTokenRevocationFilter implements WebFilter, Ordered {
         if (!enabled) return chain.filter(exchange);
 
         String path = exchange.getRequest().getPath().value();
-        // Gate on the canonical decoded path the router routes on: matched raw, a revoked
-        // homeserver token skipped this check by percent-encoding one letter of the path.
-        // A path with no single meaning cannot be proven ungated, so it is treated as
-        // gated (and never as discovery-exempt); route-access then refuses it with a 400.
+        // Decide on every spelling a downstream hop could read, not the raw string
+        // alone: the router and the homeserver decode the path, so an encoded,
+        // dotted, parameterised or re-cased variant of a gated prefix is the same
+        // request. RequestPathForms enumerates the readings; CanonicalPath is the
+        // single reading the route-access layer routes on, and a path it cannot give
+        // one meaning to is adjudicated as gated.
+        RequestPathForms forms = RequestPathForms.of(path);
         var canonical = CanonicalPath.of(exchange.getRequest());
-        boolean gated = canonical.isEmpty()
-                || (isGated(canonical.get()) && !isDiscoveryExempt(canonical.get()));
-        if (!gated) {
+        boolean ambiguous = forms.isAmbiguous();
+        // A path nested too deep to read cannot be shown to be OUTSIDE the gated
+        // surface, so it is adjudicated like a gated one. Any other ambiguity
+        // (encoded NUL, bad UTF-8, malformed escape) only matters on a gated path.
+        boolean adjudicate = isGated(forms) || forms.isNestedTooDeep()
+                || canonical.isEmpty()
+                || RequestPathForms.of(canonical.get()).anyMatches(GATED_PATHS);
+        // Discovery is exempt only when the path has one reading and that reading is
+        // a discovery path: a dot segment or an encoding that climbs out of
+        // /.well-known/** resolves to the gated path it really names.
+        boolean exempt = !ambiguous && !forms.isNestedTooDeep() && canonical.isPresent()
+                && RequestPathForms.of(canonical.get()).allMatch(DISCOVERY_EXEMPT);
+        if (!adjudicate || exempt) {
             return chain.filter(exchange);
         }
 
-        String bearer = bearerOf(exchange);
-        if (bearer == null) {
+        PresentedCredentials creds = PresentedCredentials.of(exchange.getRequest());
+        boolean mastodonApi = canonical.isEmpty() || forms.anyMatches(BODY_PARAM_PATHS)
+                || RequestPathForms.of(canonical.get()).anyMatches(BODY_PARAM_PATHS);
+        if (mastodonApi) creds.addWebSocketProtocols(exchange.getRequest());
+        BodyKind body = bodyKind(exchange.getRequest());
+        boolean bodyParams = body != BodyKind.NONE && mastodonApi;
+        if (!bodyParams) {
+            return adjudicate(exchange, chain, path, ambiguous, creds);
+        }
+        if (body == BodyKind.AMBIGUOUS) {
+            return reject(exchange, path, "unreadable-credential");
+        }
+        if (body == BodyKind.MULTIPART) {
+            // A multipart body is not buffered (media uploads). Its fields reach the
+            // server's parameter map, so with no credential in the header or query
+            // the only token would be one this filter cannot see: refuse it.
+            if (creds.isEmpty()) return reject(exchange, path, "unread-body-credential");
+            return adjudicate(exchange, chain, path, ambiguous, creds);
+        }
+        return DataBufferUtils.join(exchange.getRequest().getBody(), MAX_INSPECTED_BODY_BYTES)
+                .map(buf -> {
+                    try {
+                        byte[] bytes = new byte[buf.readableByteCount()];
+                        buf.read(bytes);
+                        return bytes;
+                    } finally {
+                        DataBufferUtils.release(buf);
+                    }
+                })
+                .defaultIfEmpty(new byte[0])
+                .map(Optional::of)
+                // Too large to read: no reading of its parameters, refused below.
+                .onErrorResume(DataBufferLimitException.class, e -> Mono.just(Optional.empty()))
+                .flatMap(read -> {
+                    if (read.isEmpty()) {
+                        return reject(exchange, path, "body-too-large-to-inspect", HttpStatus.PAYLOAD_TOO_LARGE);
+                    }
+                    byte[] bytes = read.get();
+                    if (body == BodyKind.FORM) {
+                        creds.addFormEncoded(new String(bytes, StandardCharsets.UTF_8), false);
+                    } else {
+                        creds.addJson(bytes);
+                    }
+                    return adjudicate(withBody(exchange, bytes), chain, path, ambiguous, creds);
+                });
+    }
+
+    private Mono<Void> adjudicate(ServerWebExchange exchange, WebFilterChain chain, String path,
+                                  boolean ambiguous, PresentedCredentials creds) {
+        if (creds.malformed()) {
+            // FAIL-CLOSED: a credential we could not read is one we cannot vouch for.
+            return reject(exchange, path, "unreadable-credential");
+        }
+        if (creds.tokens().isEmpty()) {
             // No homeserver token presented — not this filter's concern; the
             // coarse SecurityConfig gate + route-access layer already decide
             // whether an anonymous request may reach this path.
             return chain.filter(exchange);
         }
 
-        String hash = sha256(bearer);
-        HsToken token = revocations.hsTokenFor(hash);
-        if (token == null) {
-            // FAIL-CLOSED: a bearer on a gated path that the gateway has no
-            // recorded mint for cannot be vouched for.
-            return reject(exchange, path, "unrecognized-homeserver-token");
+        if (ambiguous) {
+            // FAIL-CLOSED: a path with no single reading (malformed escape, encoded
+            // NUL, non-UTF-8 bytes, nesting deeper than we follow) cannot be proven
+            // to be outside the gated surface, so a presented bearer is refused.
+            return reject(exchange, path, "ambiguous-path");
         }
 
-        String revokedKey = firstRevokedKey(token);
-        if (revokedKey != null) {
-            return reject(exchange, path, revokedKey);
+        // Every presented token must pass: which one the downstream honours is its
+        // choice, not ours.
+        for (String bearer : creds.tokens()) {
+            HsToken token = revocations.hsTokenFor(sha256(bearer));
+            if (token == null) {
+                // FAIL-CLOSED: a bearer on a gated path that the gateway has no
+                // recorded mint for cannot be vouched for.
+                return reject(exchange, path, "unrecognized-homeserver-token");
+            }
+            String revokedKey = firstRevokedKey(token);
+            if (revokedKey != null) {
+                return reject(exchange, path, revokedKey);
+            }
         }
         return chain.filter(exchange);
+    }
+
+    private enum BodyKind { NONE, FORM, JSON, MULTIPART, AMBIGUOUS }
+
+    /** Which body parser a Plug/Rails-style server would run, judged loosely
+     *  (case-insensitive, any parameters) so a spelling variant is not missed. */
+    private static BodyKind bodyKind(ServerHttpRequest request) {
+        List<String> types = request.getHeaders().get(HttpHeaders.CONTENT_TYPE);
+        if (types == null || types.isEmpty()) return BodyKind.NONE;
+        String ct = String.join(",", types).toLowerCase(Locale.ROOT);
+        if (ct.contains("multipart/")) return BodyKind.MULTIPART;
+        boolean form = ct.contains("x-www-form-urlencoded");
+        boolean json = ct.contains("json");
+        if (form && json) return BodyKind.AMBIGUOUS;   // two parsers could claim it
+        if (form) return BodyKind.FORM;
+        if (json) return BodyKind.JSON;
+        return BodyKind.NONE;
+    }
+
+    /** The exchange with its already-read body replayed for the routing filter. */
+    private static ServerWebExchange withBody(ServerWebExchange exchange, byte[] bytes) {
+        ServerHttpRequest replay = new ServerHttpRequestDecorator(exchange.getRequest()) {
+            @Override
+            public Flux<DataBuffer> getBody() {
+                if (bytes.length == 0) return Flux.empty();
+                return Flux.defer(() -> Flux.just(exchange.getResponse().bufferFactory().wrap(bytes)));
+            }
+        };
+        return exchange.mutate().request(replay).build();
     }
 
     /** The first revocation key that denies this token, or {@code null} if none. */
@@ -170,25 +302,9 @@ public class HomeserverTokenRevocationFilter implements WebFilter, Ordered {
         return null;
     }
 
-    private boolean isGated(String path) {
-        for (String p : GATED_PATHS) if (MATCHER.match(p, path)) return true;
-        return false;
-    }
-
-    private boolean isDiscoveryExempt(String path) {
-        for (String p : DISCOVERY_EXEMPT) if (MATCHER.match(p, path)) return true;
-        return false;
-    }
-
-    private static String bearerOf(ServerWebExchange exchange) {
-        String auth = exchange.getRequest().getHeaders().getFirst(HttpHeaders.AUTHORIZATION);
-        if (auth == null) return null;
-        String trimmed = auth.trim();
-        if (trimmed.regionMatches(true, 0, "Bearer ", 0, 7)) {
-            String token = trimmed.substring(7).trim();
-            return token.isEmpty() ? null : token;
-        }
-        return null;
+    /** Gated if ANY spelling of the path is under a gated prefix (case-insensitive). */
+    private boolean isGated(RequestPathForms forms) {
+        return forms.anyMatches(GATED_PATHS);
     }
 
     /** SHA-256 of the bearer, lower-case hex — matches what the mint side stores
@@ -205,8 +321,12 @@ public class HomeserverTokenRevocationFilter implements WebFilter, Ordered {
     }
 
     private Mono<Void> reject(ServerWebExchange exchange, String path, String key) {
+        return reject(exchange, path, key, HttpStatus.FORBIDDEN);
+    }
+
+    private Mono<Void> reject(ServerWebExchange exchange, String path, String key, HttpStatus status) {
         log.warn("[hs-revocation] denied homeserver request — key={} path={}", key, path);
-        exchange.getResponse().setStatusCode(HttpStatus.FORBIDDEN);
+        exchange.getResponse().setStatusCode(status);
         exchange.getResponse().getHeaders().add("X-HS-Revoked", revocations.reasonFor(key));
         return exchange.getResponse().setComplete();
     }
