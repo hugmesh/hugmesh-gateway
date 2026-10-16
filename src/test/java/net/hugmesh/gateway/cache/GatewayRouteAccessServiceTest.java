@@ -867,6 +867,46 @@ class GatewayRouteAccessServiceTest {
     }
 
     @Test
+    void bffRegister_isAnAuthenticatedSurface_exactAndSubtree_inBothSeeds() {
+        // Issue #29, decision "document register as an authenticated surface, keep
+        // it closed" (docs/decisions/002-bff-register-authenticated.md). user-bff's
+        // register mints a session for an allow-listed email without proof of
+        // ownership, so /bff/register must NEVER be anonymous at the route-access
+        // layer. The existing /bff/register/start assertion in
+        // canonicalSeed_feGateway_nativeLoginSurfacesAreAnonymous covers the
+        // subtree; this pins the EXACT path (the one user-bff serves) and the rows
+        // themselves, for the baked seed AND the compose Postgres seed (which
+        // REPLACES the baked seed wholesale when it loads).
+        var composeFe = composeSeedRulesFor(CanonicalSeed.FE);
+        var seeds = java.util.Map.of(
+                "CanonicalSeed.fe", CanonicalSeed.forGateway(CanonicalSeed.FE),
+                "compose/route-access-seed.sql", composeFe);
+        for (var e : seeds.entrySet()) {
+            var rules = e.getValue();
+            assertThat(rules.stream().filter(r -> r.urlPattern().startsWith("/bff/register")).toList())
+                .as("%s must still carry a /bff/register row (a deleted row would make the "
+                        + "PUBLIC check below vacuous)", e.getKey())
+                .isNotEmpty();
+            assertThat(rules.stream()
+                    .filter(r -> r.urlPattern().startsWith("/bff/register"))
+                    .filter(r -> "PUBLIC".equals(r.role()))
+                    .map(Rule::urlPattern).toList())
+                .as("%s must not seed /bff/register PUBLIC", e.getKey())
+                .isEmpty();
+
+            var s = new GatewayRouteAccessService(null, null, "hugmesh-fe-gateway", true, false, null);
+            s.primeForTest(rules);
+            for (String path : List.of("/bff/register", "/bff/register/start", "/bff/register/complete",
+                    "/bff/register/google", "/bff/register/discord")) {
+                assertThat(s.decide(path, "default", List.of(), List.of()))
+                    .as("%s: anonymous %s", e.getKey(), path).isEqualTo(Decision.DENY);
+                assertThat(s.decide(path, "default", List.of("u1"), List.of("ROLE_USER")))
+                    .as("%s: ROLE_USER %s", e.getKey(), path).isEqualTo(Decision.ALLOW);
+            }
+        }
+    }
+
+    @Test
     void canonicalSeed_feGateway_publicAnnouncementsAreAnonymous() {
         // /bff/public/announcements/** is the UNAUTHENTICATED login-page banner
         // surface: anonymous (no authorities) must resolve to ALLOW, while the

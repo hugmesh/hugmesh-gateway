@@ -235,6 +235,44 @@ class SecurityConfigPathGateSliceTest extends SecuritySliceSupport {
         client.get().uri("/api/reports/q3").exchange().expectStatus().isUnauthorized();
     }
 
+    /** The exact path plus the subtree paths that exist or are used as probes:
+     *  stage 1 per provider, stage 2, and the /start probe the route-access test
+     *  has always used. */
+    private static final List<String> REGISTER_PATHS = List.of(
+            "/bff/register", "/bff/register/start", "/bff/register/complete",
+            "/bff/register/google", "/bff/register/discord");
+
+    @Test
+    void anonymous_deniedOn_bffRegister_exactAndSubtree() {
+        // /bff/register is a COOKIE-AUTHENTICATED surface (docs/decisions/002).
+        // user-bff's register mints a session for an allow-listed email without
+        // proof that the caller owns it, so it must not be reachable anonymously:
+        // the coarse floor 401s it before routing. Both the exact path (the POST
+        // user-bff serves) and the /bff/register/** subtree (/start, /complete)
+        // are pinned, on POST (the real verb) and GET. ProbeController maps every
+        // path below, so an anonymous ALLOW would surface as a 200, not a 404 that
+        // could be mistaken for a security decision. RED if "/bff/register" or
+        // "/bff/register/**" is ever added to PUBLIC_PATHS.
+        for (String path : REGISTER_PATHS) {
+            client.post().uri(path).exchange().expectStatus().isUnauthorized();
+            client.get().uri(path).exchange().expectStatus().isUnauthorized();
+        }
+        // Sibling control: the exact-path /bff/login stays anonymous in the same
+        // chain, so a 401 above is the register decision, not a broken harness.
+        client.get().uri("/bff/login").exchange()
+                .expectStatus().value(st -> assertNot401Nor403("/bff/login", st));
+    }
+
+    @Test
+    void authenticatedUser_reachesBffRegister() {
+        // The other half of "cookie-authenticated": a ROLE_USER principal passes
+        // the floor on the exact path and the subtree (route access is a separate
+        // layer, pinned in GatewayRouteAccessServiceTest).
+        for (String path : REGISTER_PATHS) {
+            as(List.of("user"), path).exchange().expectStatus().isOk();
+        }
+    }
+
     @Test
     void anonymous_deniedOn_infraPath() {
         // Infra paths are NEVER public — anonymous gets 401 (no auth) at the floor.
@@ -263,6 +301,8 @@ class SecurityConfigPathGateSliceTest extends SecuritySliceSupport {
                 "/api/auth/token", "/api/registration/start", "/api/login/options",
                 "/bff/public/announcements/login", "/bff/public/appeal-contact",
                 "/bff/password-reset/request", "/bff/password-reset/confirm",
+                "/bff/login", "/bff/register", "/bff/register/start", "/bff/register/complete",
+                "/bff/register/google", "/bff/register/discord",
                 "/_matrix/client/versions", "/api/v1/timelines/public",
                 "/.well-known/matrix/client",
         })

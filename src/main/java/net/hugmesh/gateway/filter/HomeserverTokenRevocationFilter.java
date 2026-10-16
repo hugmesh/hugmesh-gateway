@@ -14,6 +14,7 @@ import org.springframework.web.server.WebFilterChain;
 import reactor.core.publisher.Mono;
 import net.hugmesh.gateway.cache.RevocationListService;
 import net.hugmesh.gateway.cache.RevocationListService.HsToken;
+import net.hugmesh.gateway.security.CanonicalPath;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -108,7 +109,14 @@ public class HomeserverTokenRevocationFilter implements WebFilter, Ordered {
         if (!enabled) return chain.filter(exchange);
 
         String path = exchange.getRequest().getPath().value();
-        if (!isGated(path) || isDiscoveryExempt(path)) {
+        // Gate on the canonical decoded path the router routes on: matched raw, a revoked
+        // homeserver token skipped this check by percent-encoding one letter of the path.
+        // A path with no single meaning cannot be proven ungated, so it is treated as
+        // gated (and never as discovery-exempt); route-access then refuses it with a 400.
+        var canonical = CanonicalPath.of(exchange.getRequest());
+        boolean gated = canonical.isEmpty()
+                || (isGated(canonical.get()) && !isDiscoveryExempt(canonical.get()));
+        if (!gated) {
             return chain.filter(exchange);
         }
 
