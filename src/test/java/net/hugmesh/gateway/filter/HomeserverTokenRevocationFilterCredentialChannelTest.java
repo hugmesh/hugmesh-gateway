@@ -247,4 +247,31 @@ class HomeserverTokenRevocationFilterCredentialChannelTest {
         post("/_matrix/client/v3/room_keys/keys", "application/json", big, "Bearer good");
         assertThat(forwarded).isTrue();
     }
+
+    // ---- streaming upgrade: the Mastodon streaming API reads Sec-WebSocket-Protocol ----
+
+    @Test
+    void revokedToken_inSecWebSocketProtocol_isRefused() {
+        var svc = new RevocationListService(null, true);
+        svc.primeRevokedForTest(Set.of("hs:mastodon:alice"));
+        svc.primeHsTokensForTest(Map.of(
+                HomeserverTokenRevocationFilter.sha256("banned-masto"), new HsToken("alice", "mastodon", "brokered", "app1"),
+                HomeserverTokenRevocationFilter.sha256("good"), new HsToken("bob", "mastodon", "brokered", "app9")));
+        var f = new HomeserverTokenRevocationFilter(svc, true);
+        for (String protocols : List.of("banned-masto", "good, banned-masto")) {
+            forwarded.set(false);
+            var ex = MockServerWebExchange.from(MockServerHttpRequest
+                    .get("http://gw/api/v1/streaming?stream=user")
+                    .header("Upgrade", "websocket").header("Connection", "Upgrade")
+                    .header("Sec-WebSocket-Protocol", protocols).build());
+            f.filter(ex, chain).block();
+            assertThat(forwarded).as(protocols).isFalse();
+            assertThat(ex.getResponse().getStatusCode()).as(protocols).isEqualTo(HttpStatus.FORBIDDEN);
+        }
+        forwarded.set(false);
+        f.filter(MockServerWebExchange.from(MockServerHttpRequest
+                .get("http://gw/api/v1/streaming?stream=user")
+                .header("Sec-WebSocket-Protocol", "good").build()), chain).block();
+        assertThat(forwarded).isTrue();
+    }
 }

@@ -61,7 +61,8 @@ import java.util.Optional;
  * <p><b>Every credential channel.</b> A homeserver can take its bearer from more than
  * the first {@code Authorization} header: a later header line, an
  * {@code access_token} query parameter, or (on the Mastodon-API surface) an
- * {@code access_token} member of a form or JSON body. Each one presented is
+ * {@code access_token} member of a form or JSON body or a
+ * {@code Sec-WebSocket-Protocol} entry on a streaming upgrade. Each one presented is
  * adjudicated and the request is refused unless every one passes, so a revoked token
  * cannot ride beside a good one or move to a channel this filter does not read. See
  * {@link PresentedCredentials}.
@@ -162,10 +163,11 @@ public class HomeserverTokenRevocationFilter implements WebFilter, Ordered {
         }
 
         PresentedCredentials creds = PresentedCredentials.of(exchange.getRequest());
+        boolean mastodonApi = canonical.isEmpty() || forms.anyMatches(BODY_PARAM_PATHS)
+                || RequestPathForms.of(canonical.get()).anyMatches(BODY_PARAM_PATHS);
+        if (mastodonApi) creds.addWebSocketProtocols(exchange.getRequest());
         BodyKind body = bodyKind(exchange.getRequest());
-        boolean bodyParams = body != BodyKind.NONE
-                && (canonical.isEmpty() || forms.anyMatches(BODY_PARAM_PATHS)
-                    || RequestPathForms.of(canonical.get()).anyMatches(BODY_PARAM_PATHS));
+        boolean bodyParams = body != BodyKind.NONE && mastodonApi;
         if (!bodyParams) {
             return adjudicate(exchange, chain, path, ambiguous, creds);
         }

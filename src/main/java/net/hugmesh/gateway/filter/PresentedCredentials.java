@@ -62,6 +62,16 @@ final class PresentedCredentials {
         return c;
     }
 
+    /** The Mastodon streaming API takes its token from {@code Sec-WebSocket-Protocol}
+     *  (a browser cannot set Authorization on a WebSocket): every listed entry. */
+    void addWebSocketProtocols(ServerHttpRequest request) {
+        List<String> lines = request.getHeaders().get("Sec-WebSocket-Protocol");
+        if (lines == null) return;
+        for (String line : lines) {
+            for (String entry : line.split(",")) add(entry.strip());
+        }
+    }
+
     void addAuthorization(String line) {
         if (line == null) return;
         for (String part : line.split(",")) {
