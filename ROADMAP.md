@@ -126,12 +126,13 @@ cross-repo items list the target repo(s).
   structured appeal. `hugmesh-admin-bff-api` stores those appeals
   (changelog `250-account-appeals.xml`, `AccountAppeal*` controllers).
 - **Gateway side**: the anonymous `GET /bff/public/appeal-contact` path is in
-  `SecurityConfig` `PUBLIC_PATHS`. The dead `/_remotes/banned/**` permit was
-  **removed** from `PUBLIC_PATHS`, `BffSessionProperties` and `application.yml`:
-  nothing is served at that prefix, so an anonymous permit there would only
-  expose whatever is later mounted on it. It now falls to the
-  `authenticated()` floor (pinned by `SecurityConfigPathGateSliceTest` and
-  `BffSessionSkipPathsTest`).
+  `SecurityConfig` `PUBLIC_PATHS`. `/_remotes/banned/**` is **no longer** an
+  unconditional permit. The platform does not serve it, but `hugmesh-games` does
+  (its `banned` remote, behind the be-tier `games` host route). It is now opt-in:
+  `app.security.banned-remote-public=true` adds it to the coarse permits and to the
+  `bff_` introspection skip list together; anything else leaves it on the
+  `authenticated()` floor (pinned by `SecurityConfigPathGateSliceTest`,
+  `BffSessionSkipPathsTest` and `BffSessionBannedRemoteSkipTest`).
 - **Acceptance**: `hugmesh-login-ui` `e2e/features/auth/login-blocked.feature`
   covers a blocked sign-in landing on the appeal page, and
   `e2e/features/auth/appeal-submit.feature` covers the structured submit.

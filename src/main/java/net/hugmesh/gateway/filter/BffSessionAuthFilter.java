@@ -121,7 +121,19 @@ public class BffSessionAuthFilter implements WebFilter, Ordered {
     /** The header name to carry the internal token. Default: X-Internal-Token. */
     private final String internalTokenHeader;
 
+    /** {@code true} only when {@code app.security.banned-remote-public} is the literal
+     *  {@code true}: then {@code /_remotes/banned/**} also skips introspection, matching
+     *  the coarse permit {@code SecurityConfig} adds under the same switch
+     *  ({@link net.hugmesh.gateway.config.BannedRemotePermit}). */
+    private final boolean bannedRemotePublic;
+
     public BffSessionAuthFilter(WebClient bffClient, BffSessionProperties props) {
+        this(bffClient, props, false);
+    }
+
+    public BffSessionAuthFilter(WebClient bffClient, BffSessionProperties props,
+                                boolean bannedRemotePublic) {
+        this.bannedRemotePublic = bannedRemotePublic;
         this.bffClient = bffClient;
         this.props = props;
         this.internalToken = props.getInternalToken();
@@ -367,7 +379,8 @@ public class BffSessionAuthFilter implements WebFilter, Ordered {
     // ── path matching ─────────────────────────────────────────────────────────
 
     private boolean isSkipped(String path) {
-        for (String pattern : props.getSkipPaths()) {
+        for (String pattern : net.hugmesh.gateway.config.BannedRemotePermit.skipPaths(
+                props.getSkipPaths(), bannedRemotePublic)) {
             if (MATCHER.match(pattern, path)) return true;
         }
         return false;

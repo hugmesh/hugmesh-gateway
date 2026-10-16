@@ -60,8 +60,13 @@ abstract class SecuritySliceSupport {
             ObjectProvider<ReactiveAuthenticationManagerResolver<ServerWebExchange>> tenantResolver,
             Object... controllers) {
 
-        SecurityConfig config = new SecurityConfig(
-                registry, tenantResolver, applicationName, false, 600_000L);
+        return sliceClient(new SecurityConfig(
+                registry, tenantResolver, applicationName, false, 600_000L), controllers);
+    }
+
+    /** Slice over an already-built {@link SecurityConfig} (any constructor), so a test
+     *  can drive the production {@code @Autowired} constructor's property parsing. */
+    static WebTestClient sliceClient(SecurityConfig config, Object... controllers) {
         SecurityWebFilterChain chain = config.filterChain(ServerHttpSecurity.http());
         WebFilterChainProxy securityFilter = new WebFilterChainProxy(chain);
 

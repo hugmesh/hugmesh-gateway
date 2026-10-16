@@ -14,9 +14,9 @@ import static org.assertj.core.api.Assertions.assertThat;
  * The bff_ introspection skip list ({@code app.bff-session.skip-paths}) has two
  * spellings: the Java default in {@link BffSessionProperties} and the shipped
  * {@code application.yml}. They must agree, and neither may name
- * {@code /_remotes/banned/**} — nothing is served there, so a skip entry is dead
- * surface (and the matching coarse permit in {@code SecurityConfig.PUBLIC_PATHS}
- * is pinned absent by {@code SecurityConfigPathGateSliceTest}).
+ * {@code /_remotes/banned/**}: that prefix is added at runtime only by
+ * {@link BannedRemotePermit} (one switch for this list and the coarse permit), so an
+ * operator who overrides {@code skip-paths} cannot silently drop or keep it.
  */
 class BffSessionSkipPathsTest {
 
@@ -44,5 +44,31 @@ class BffSessionSkipPathsTest {
         }
         assertThat(fromYml).isNotEmpty().doesNotContain(BANNED);
         assertThat(fromYml).containsExactlyElementsOf(new BffSessionProperties().getSkipPaths());
+    }
+
+    @Test
+    void theSwitchIsShippedOffInApplicationYml() {
+        YamlPropertiesFactoryBean yaml = new YamlPropertiesFactoryBean();
+        yaml.setResources(new ClassPathResource("application.yml"));
+        Properties props = yaml.getObject();
+        assertThat(props).isNotNull();
+        assertThat(props.getProperty(BannedRemotePermit.PROPERTY))
+                .isEqualTo("${APP_SECURITY_BANNED_REMOTE_PUBLIC:false}");
+    }
+
+    @Test
+    void bannedRemotePermit_parsingAndListsAreFailClosed() {
+        for (String raw : java.util.Arrays.asList(null, "", " ", "false", "yes", "1", "on", "tru")) {
+            assertThat(BannedRemotePermit.enabled(raw)).as("raw=%s", raw).isFalse();
+        }
+        for (String raw : List.of("true", "TRUE", " True ")) {
+            assertThat(BannedRemotePermit.enabled(raw)).as("raw=%s", raw).isTrue();
+        }
+        List<String> base = new BffSessionProperties().getSkipPaths();
+        assertThat(BannedRemotePermit.skipPaths(base, false)).containsExactlyElementsOf(base);
+        assertThat(BannedRemotePermit.skipPaths(base, true)).containsAll(base).contains(BANNED)
+                .hasSize(base.size() + 1);
+        assertThat(BannedRemotePermit.skipPaths(BannedRemotePermit.skipPaths(base, true), true))
+                .hasSize(base.size() + 1);
     }
 }

@@ -180,6 +180,11 @@ The resource-server `SecurityWebFilterChain` applies the coarse, role-only floor
 - **Public** (`permitAll`): `/api/auth/**`, `/api/registration/**`, `/api/login/**`,
   the `/_remotes/{login,registration}/**` federated UI shells, and
   `/bff/public/announcements/**` (the unauthenticated pre-auth login banners).
+- **Opt-in** (`app.security.banned-remote-public`, env
+  `APP_SECURITY_BANNED_REMOTE_PUBLIC`, shipped `false`): `/_remotes/banned/**`,
+  the hugmesh-games `banned` remote. Only the literal `true` turns it on, and it
+  then both permits the prefix anonymously and skips `bff_` introspection there.
+  Off, the prefix is on the `authenticated()` floor. See `BannedRemotePermit`.
 - **Homeserver passthrough** (`permitAll` at the OAuth2 layer): `/_matrix/**`,
   `/api/v1/**`, `/api/v2/**`, `/oauth/**`, `/.well-known/**` — these carry an
   opaque Matrix/Mastodon bearer, **not** a Casdoor JWT, so requiring a JWT here
