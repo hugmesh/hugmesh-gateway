@@ -1,5 +1,6 @@
 package net.hugmesh.gateway.config;
 
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
@@ -74,7 +75,10 @@ public class BffSessionConfig {
     @Bean
     BffSessionAuthFilter bffSessionAuthFilter(
             WebClient bffIntrospectWebClient,
-            BffSessionProperties props) {
-        return new BffSessionAuthFilter(bffIntrospectWebClient, props);
+            BffSessionProperties props,
+            @Value("${" + BannedRemotePermit.PROPERTY + ":false}") String bannedRemotePublic) {
+        // One switch for both lists: the coarse permit in SecurityConfig and this skip.
+        return new BffSessionAuthFilter(bffIntrospectWebClient, props,
+                BannedRemotePermit.enabled(bannedRemotePublic));
     }
 }

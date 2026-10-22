@@ -198,7 +198,7 @@ The resource-server `SecurityWebFilterChain` applies the coarse, role-only floor
   patterns come from that route's own `Host` predicate. A pki instance that has a
   `headscale` route whose Host cannot be read refuses to start.
 - **Public** (`permitAll`): `/api/auth/**`, `/api/registration/**`, `/api/login/**`,
-  `/_remotes/{login,registration,banned}/**`, `/bff/public/announcements/**`,
+  `/_remotes/{login,registration}/**`, `/bff/public/announcements/**`,
   `/bff/public/appeal-contact`, `/bff/public/theme`, `/bff/public/theme.css`,
   `/bff/password-reset/request`, `/bff/password-reset/confirm` and `/bff/login` (the
   native-login credential POST). The `/bff/public/*` paths and the password-reset paths
@@ -209,6 +209,11 @@ The resource-server `SecurityWebFilterChain` applies the coarse, role-only floor
   `/api/federation/vanity`, `/api/federation/vanity/**` and
   `/api/federation/capabilities`. On the pki and be tiers (and for an unknown instance
   name) these stay on the authenticated floor.
+- **Opt-in** (`app.security.banned-remote-public`, env
+  `APP_SECURITY_BANNED_REMOTE_PUBLIC`, shipped `false`): `/_remotes/banned/**`,
+  the hugmesh-games `banned` remote. Only the literal `true` turns it on, and it
+  then both permits the prefix anonymously and skips `bff_` introspection there.
+  Off, the prefix is on the `authenticated()` floor. See `BannedRemotePermit`.
 - **Homeserver passthrough** (`permitAll` at the OAuth2 layer): `/_matrix/**`,
   `/api/v1/**`, `/api/v2/**`, `/oauth/**`, `/.well-known/**`. These carry an opaque
   Matrix/Mastodon bearer, **not** a Casdoor JWT, so demanding a JWT here would 401

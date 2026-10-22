@@ -78,7 +78,6 @@ public class BffSessionProperties {
             "/api/login/**",
             "/_remotes/login/**",
             "/_remotes/registration/**",
-            "/_remotes/banned/**",
             "/bff/public/announcements/**",
             "/bff/public/appeal-contact",
             "/_matrix/**",

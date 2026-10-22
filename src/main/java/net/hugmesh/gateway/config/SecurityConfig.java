@@ -156,6 +156,10 @@ public class SecurityConfig {
      *  future) does NOT yield {@code MFA_SATISFIED}. */
     private final long mfaFreshnessWindowMillis;
 
+    /** {@link #PUBLIC_PATHS}, plus {@link BannedRemotePermit#PATTERN} only when
+     *  {@value BannedRemotePermit#PROPERTY} is the literal {@code true}. */
+    private final String[] publicPaths;
+
     @Autowired
     public SecurityConfig(DomainRegistry domainRegistry,
                           ObjectProvider<ReactiveAuthenticationManagerResolver<ServerWebExchange>>
@@ -163,9 +167,11 @@ public class SecurityConfig {
                           @Value("${spring.application.name:}") String applicationName,
                           @Value("${app.mfa.enabled:false}") boolean mfaEnabled,
                           @Value("${app.mfa.freshness-window:600000}") long mfaFreshnessWindowMillis,
-                          ObjectProvider<GatewayProperties> gatewayProperties) {
+                          ObjectProvider<GatewayProperties> gatewayProperties,
+                          @Value("${" + BannedRemotePermit.PROPERTY + ":false}") String bannedRemotePublic) {
         this(domainRegistry, tenantAuthManagerResolver, applicationName, mfaEnabled,
-                mfaFreshnessWindowMillis, routesOf(gatewayProperties.getIfAvailable()));
+                mfaFreshnessWindowMillis, routesOf(gatewayProperties.getIfAvailable()),
+                BannedRemotePermit.enabled(bannedRemotePublic));
     }
 
     /** Route-list form of the production constructor — the seam the headscale-gate
@@ -177,6 +183,25 @@ public class SecurityConfig {
                    boolean mfaEnabled,
                    long mfaFreshnessWindowMillis,
                    List<RouteDefinition> routes) {
+        this(domainRegistry, tenantAuthManagerResolver, applicationName, mfaEnabled,
+                mfaFreshnessWindowMillis, routes, false);
+    }
+
+    /** Full form: the route list plus the opt-in banned-remote permit
+     *  ({@link BannedRemotePermit}). Every shorter constructor passes {@code false}. */
+    SecurityConfig(DomainRegistry domainRegistry,
+                   ObjectProvider<ReactiveAuthenticationManagerResolver<ServerWebExchange>>
+                           tenantAuthManagerResolver,
+                   String applicationName,
+                   boolean mfaEnabled,
+                   long mfaFreshnessWindowMillis,
+                   List<RouteDefinition> routes,
+                   boolean bannedRemotePublic) {
+        this.publicPaths = BannedRemotePermit.publicPaths(PUBLIC_PATHS, bannedRemotePublic);
+        if (bannedRemotePublic) {
+            log.info("[security] {}=true: anonymous permit on {}",
+                    BannedRemotePermit.PROPERTY, BannedRemotePermit.PATTERN);
+        }
         this.domainRegistry = domainRegistry;
         this.tenantAuthManagerResolver = tenantAuthManagerResolver;
         this.feTier = isFeTier(applicationName);
@@ -341,15 +366,18 @@ public class SecurityConfig {
         return applicationName != null && applicationName.endsWith("-fe-gateway");
     }
 
-    /** Paths that anonymous traffic must reach (login, registration,
-     *  banned-user page). Aligned with the front-end remote modules. */
+    /** Paths that anonymous traffic must reach (login, registration).
+     *  {@code /_remotes/banned/**} is NOT in this list: only hugmesh-games serves a
+     *  remote there, so it is an opt-in permit ({@link BannedRemotePermit}, off unless
+     *  {@value BannedRemotePermit#PROPERTY} is {@code true}) rather than an anonymous
+     *  hole on every gateway. The platform banned-user flow is the login-ui appeal
+     *  page, fed by {@code /bff/public/appeal-contact} below. */
     private static final String[] PUBLIC_PATHS = {
             "/api/auth/**",
             "/api/registration/**",
             "/api/login/**",
             "/_remotes/login/**",
             "/_remotes/registration/**",
-            "/_remotes/banned/**",
             // Public login-page announcements: the admin-bff exposes
             // GET /bff/public/announcements/login UNAUTHENTICATED so the
             // pre-auth LOGIN page can render published login-target banners.
@@ -540,7 +568,7 @@ public class SecurityConfig {
                     if (!headscaleHostPatterns.isEmpty()) {
                         ex.matchers(headscaleHostMatcher()).hasRole("SUPERADMIN");
                     }
-                    ex.pathMatchers(PUBLIC_PATHS).permitAll();
+                    ex.pathMatchers(publicPaths).permitAll();
                     // FE front door ONLY: the anonymous SPA shell + the public
                     // federation reads, GET-only. Other tiers (pki/be) and other
                     // methods stay on the authenticated() floor — see

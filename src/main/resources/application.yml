@@ -120,6 +120,13 @@ app:
   # gateway.
   domain-header:
     forward: ${APP_DOMAIN_HEADER_FORWARD:false}
+  # ── hugmesh-games banned remote — OPT-IN anonymous permit ────────────────────
+  # When the literal "true", /_remotes/banned/** is anonymous (coarse permitAll)
+  # AND skips bff_ introspection. Only hugmesh-games serves a remote there; any
+  # other value (blank, yes, 1, on, a typo) leaves the prefix on the
+  # authenticated() floor. See BannedRemotePermit.
+  security:
+    banned-remote-public: ${APP_SECURITY_BANNED_REMOTE_PUBLIC:false}
   revocation:
     enabled: true
     refresh-interval-ms: 5000   # 5 s — fast enough that a block
@@ -162,7 +169,6 @@ app:
       - /api/login/**
       - /_remotes/login/**
       - /_remotes/registration/**
-      - /_remotes/banned/**
       - /bff/public/announcements/**
       - /bff/public/appeal-contact
       - /_matrix/**
