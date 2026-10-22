@@ -1,55 +1,151 @@
-# Manual release workflow: build the gateway's container image and publish it
-# to GHCR. Mirrors the image-build step of this repo's .gitlab-ci.yml
-# (build:image job), adapted from the in-cluster GitLab registry to GHCR.
-#
-# Deliberately workflow_dispatch-only — this must stay fully inert (no push /
-# tag triggers) until a human flips it on.
 name: Release
 
+# Builds the gateway's container image and publishes it to
+# ghcr.io/hugmesh/hugmesh-gateway. Mirrors the image-build step of this repo's
+# .gitlab-ci.yml (build:image job), adapted from the in-cluster GitLab registry
+# to GHCR. The be/fe/pki-gateway overlays build FROM an exact version of it.
+#
+# When it runs:
+#   - push to main          -> image tags :main and :sha-<12>
+#   - push of a tag v<VER>  -> image tags :<VER>, :beta and :sha-<12>, plus a
+#                              GitHub prerelease (never marked latest).
+#                              <VER> must equal <project><version> in pom.xml.
+#   - workflow_dispatch     -> on main: same as a push to main; on a v* tag:
+#                              same as that tag push (the re-run path).
+#                              Anything else is refused by the version job.
+# There is no pull_request trigger, and there must never be one: the publish
+# jobs may run on the self-hosted runner (see runs-on below).
+#
+# A beta is never tagged :latest; only a final release (no '-' in the version)
+# would move :latest, and none exists yet. A published :<VER> is never
+# overwritten: raise the beta number in pom.xml and tag again.
 on:
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: 'Image tag to publish (defaults to the short commit SHA)'
-        required: false
-        type: string
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 env:
-  REGISTRY: ghcr.io
-  IMAGE_NAME: hugmesh/hugmesh-gateway
+  IMAGE_NAME: ghcr.io/hugmesh/hugmesh-gateway
 
 jobs:
-  build-and-push:
-    # RUNS_ON is a repo variable holding a JSON runner spec (the org's self-hosted runner);
-    # unset, it falls back to a GitHub-hosted runner.
-    runs-on: ${{ fromJSON(vars.RUNS_ON || '"ubuntu-latest"') }}
+  version:
+    # Publish jobs use the self-hosted runner (vars.RUNS_ON_PUBLISH, a JSON
+    # array of labels) only for main, v* tags and studio-v* tags, and never
+    # for a pull_request event. Everything else, or an unset variable, runs on
+    # hosted ubuntu-latest. Deleting RUNS_ON_PUBLISH is the off switch.
+    runs-on: ${{ fromJSON(github.event_name != 'pull_request' && github.event_name != 'pull_request_target' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/studio-v')) && vars.RUNS_ON_PUBLISH || '"ubuntu-latest"') }}
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      kind: ${{ steps.v.outputs.kind }}
+      sha12: ${{ steps.v.outputs.sha12 }}
+      commons_version: ${{ steps.v.outputs.commons_version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Full history, so a tag run can check that the tagged commit is on main.
+          fetch-depth: 0
+
+      - name: Read and check the version
+        id: v
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -f pom.xml ]; then
+            echo "::error::pom.xml is missing"
+            exit 1
+          fi
+          # <project><version> is the version source. Only DIRECT children of
+          # <project> are read: the <parent> block carries its own <version>
+          # (spring-boot-starter-parent), which must never be mistaken for ours.
+          fields=$(python3 - <<'PY'
+          import xml.etree.ElementTree as ET
+          ns = {'m': 'http://maven.apache.org/POM/4.0.0'}
+          root = ET.parse('pom.xml').getroot()
+          v = root.find('m:version', ns)
+          version = ((v.text or '') if v is not None else '').strip()
+          commons = ''
+          for d in root.findall('m:dependencies/m:dependency', ns):
+              if (d.findtext('m:groupId', '', ns).strip() == 'net.hugmesh'
+                      and d.findtext('m:artifactId', '', ns).strip() == 'hugmesh-commons'):
+                  commons = d.findtext('m:version', '', ns).strip()
+          print(version or '-', commons or '-')
+          PY
+          )
+          read -r version commons_version <<<"$fields"
+          semver='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
+          if ! [[ "$version" =~ $semver ]]; then
+            echo "::error::pom.xml version '$version' is not MAJOR.MINOR.PATCH[-pre] (no +build metadata)"
+            exit 1
+          fi
+          case "$version" in
+            *SNAPSHOT*)
+              echo "::error::pom.xml version '$version' is a SNAPSHOT; published versions never are"
+              exit 1
+              ;;
+          esac
+          if ! [[ "$commons_version" =~ $semver ]] || [[ "$commons_version" == *SNAPSHOT* ]]; then
+            echo "::error::the net.hugmesh:hugmesh-commons pin in pom.xml ('$commons_version') must be a literal, published, non-SNAPSHOT version"
+            exit 1
+          fi
+          case "$GITHUB_EVENT_NAME" in
+            pull_request|pull_request_target)
+              echo "::error::a pull request never publishes"
+              exit 1
+              ;;
+          esac
+          case "$GITHUB_REF" in
+            refs/tags/v*)
+              if [ "${GITHUB_REF_NAME#v}" != "$version" ]; then
+                echo "::error::tag $GITHUB_REF_NAME does not match pom.xml version $version (expected v$version)"
+                exit 1
+              fi
+              # A release is cut from main only: a tag on an unmerged commit is refused.
+              if ! git merge-base --is-ancestor HEAD refs/remotes/origin/main; then
+                echo "::error::tag $GITHUB_REF_NAME points at a commit that is not on main; tag a commit on main"
+                exit 1
+              fi
+              kind=release
+              ;;
+            refs/heads/main)
+              kind=main
+              ;;
+            *)
+              echo "::error::refusing to publish from $GITHUB_REF: only main and v<version> tags publish"
+              exit 1
+              ;;
+          esac
+          sha12=${GITHUB_SHA:0:12}
+          {
+            echo "version=$version"
+            echo "kind=$kind"
+            echo "sha12=$sha12"
+            echo "commons_version=$commons_version"
+          } >> "$GITHUB_OUTPUT"
+          echo "version=$version kind=$kind sha12=$sha12 commons=$commons_version"
+
+  image:
+    needs: version
+    runs-on: ${{ fromJSON(github.event_name != 'pull_request' && github.event_name != 'pull_request_target' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/studio-v')) && vars.RUNS_ON_PUBLISH || '"ubuntu-latest"') }}
     permissions:
       contents: read
       packages: write
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      KIND: ${{ needs.version.outputs.kind }}
+      SHA12: ${{ needs.version.outputs.sha12 }}
+      COMMONS_VERSION: ${{ needs.version.outputs.commons_version }}
     steps:
-      - name: Check out repository
+      - name: Checkout
         uses: actions/checkout@v4
-
-      # The dispatch input reaches the shell through env, never by expression interpolation inside run:
-      # (an expression there is pasted into the script text, so a crafted tag is code).
-      - name: Compute image tag
-        id: vars
-        env:
-          INPUT_TAG: ${{ inputs.tag }}
-        run: |
-          set -eu
-          if [ -n "${INPUT_TAG}" ]; then
-            case "${INPUT_TAG}" in
-              *[!A-Za-z0-9_.-]*|.*|-*)
-                echo "::error::tag '${INPUT_TAG}' is not a valid image tag (allowed: letters, digits, '_', '.', '-'; may not start with '.' or '-')"
-                exit 1
-                ;;
-            esac
-            tag="${INPUT_TAG}"
-          else
-            tag="$(git rev-parse --short HEAD)"
-          fi
-          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
 
       # PREFLIGHT - CROSS-REPO PACKAGE READ. The image build resolves net.hugmesh:
       # hugmesh-commons and its parent net.hugmesh:hugmesh-parent, published from OTHER
@@ -58,13 +154,15 @@ jobs:
       # PACKAGES_READ_TOKEN (operator decision 90a=B). Without this step a missing token
       # surfaces ten minutes later as "Could not find artifact net.hugmesh:hugmesh-commons
       # ... in central", which reads like "not published".
-      # A 200 proves this credential can read that registry; it does NOT prove the exact
-      # version pinned in pom.xml exists - maven says that, accurately, in the build.
+      # A 200 proves this credential can read that registry. The step then also checks
+      # that the hugmesh-commons version pinned in pom.xml is listed there, so a gateway
+      # built before its commons beta is published fails here, in seconds.
       - name: Preflight, cross-repo package read
         env:
           UPSTREAM_PACKAGES_ACTOR: ${{ secrets.PACKAGES_READ_ACTOR || github.actor }}
           UPSTREAM_PACKAGES_TOKEN: ${{ secrets.PACKAGES_READ_TOKEN || secrets.GITHUB_TOKEN }}
           HAS_PACKAGES_READ_TOKEN: ${{ secrets.PACKAGES_READ_TOKEN != '' }}
+        shell: bash
         run: |
           set -uo pipefail
           if [ "${HAS_PACKAGES_READ_TOKEN}" = "true" ]; then
@@ -73,10 +171,11 @@ jobs:
             echo "read credential: the automatic secrets.GITHUB_TOKEN, because the PACKAGES_READ_TOKEN"
             echo "secret is not set. It cannot read another repository's package; expect the probe below to fail."
           fi
+          meta_dir=$(mktemp -d)
           rc=0
           for upstream in hugmesh-parent hugmesh-commons; do
             url="https://maven.pkg.github.com/hugmesh/${upstream}/net/hugmesh/${upstream}/maven-metadata.xml"
-            code=$(curl -sS -o /dev/null -w '%{http_code}' -u "${UPSTREAM_PACKAGES_ACTOR}:${UPSTREAM_PACKAGES_TOKEN}" "${url}" || echo 000)
+            code=$(curl -sS -o "${meta_dir}/${upstream}.xml" -w '%{http_code}' -u "${UPSTREAM_PACKAGES_ACTOR}:${UPSTREAM_PACKAGES_TOKEN}" "${url}" || echo 000)
             case "${code}" in
               200)
                 echo "  readable    hugmesh/${upstream}"
@@ -95,6 +194,14 @@ jobs:
                 ;;
             esac
           done
+          if [ "${rc}" -eq 0 ]; then
+            if grep -aF -- "<version>${COMMONS_VERSION}</version>" "${meta_dir}/hugmesh-commons.xml" >/dev/null; then
+              echo "  published   net.hugmesh:hugmesh-commons:${COMMONS_VERSION}"
+            else
+              echo "::error::net.hugmesh:hugmesh-commons:${COMMONS_VERSION} (the pin in pom.xml) is not listed in the registry's maven-metadata.xml. Publish hugmesh-commons v${COMMONS_VERSION} from its own tag first (chain order: build-config, parent, commons, auth-core, gateway)."
+              rc=1
+            fi
+          fi
           exit ${rc}
 
       - name: Set up Docker Buildx
@@ -103,11 +210,59 @@ jobs:
       - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
-          registry: ${{ env.REGISTRY }}
+          registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push image
+      - name: Refuse to overwrite a published version
+        if: needs.version.outputs.kind == 'release'
+        shell: bash
+        run: |
+          set -uo pipefail
+          rc=0
+          out=$(docker buildx imagetools inspect "$IMAGE_NAME:$VERSION" 2>&1) || rc=$?
+          if [ "$rc" -eq 0 ]; then
+            echo "::error::$IMAGE_NAME:$VERSION already exists; a published version is never overwritten. Raise the beta number in pom.xml and tag again."
+            exit 1
+          fi
+          if grep -Eqi 'not found|manifest unknown|name unknown' <<<"$out"; then
+            echo "$IMAGE_NAME:$VERSION is not published yet; continuing"
+          else
+            echo "::error::could not tell whether $IMAGE_NAME:$VERSION exists (refusing rather than risk an overwrite):"
+            echo "$out"
+            exit 1
+          fi
+
+      - name: Work out the image tags
+        id: tags
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$KIND" = release ]; then
+            case "$VERSION" in
+              # A beta (any pre-release) moves :beta and never :latest.
+              *-*) channel=beta ;;
+              # Only a final release (no '-') may move :latest.
+              *) channel=latest ;;
+            esac
+            tags="$IMAGE_NAME:$VERSION,$IMAGE_NAME:$channel,$IMAGE_NAME:sha-$SHA12"
+            label_version="$VERSION"
+          else
+            tags="$IMAGE_NAME:main,$IMAGE_NAME:sha-$SHA12"
+            label_version=main
+          fi
+          # Belt and braces: :latest only ever goes with a final release.
+          if [[ ",$tags," == *":latest,"* ]]; then
+            if [ "$KIND" != release ] || [[ "$VERSION" == *-* ]]; then
+              echo "::error::refusing to push a :latest tag for $KIND $VERSION"
+              exit 1
+            fi
+          fi
+          echo "tags=$tags" >> "$GITHUB_OUTPUT"
+          echo "label_version=$label_version" >> "$GITHUB_OUTPUT"
+          echo "tags=$tags"
+
+      - name: Build and push
         uses: docker/build-push-action@v6
         env:
           # No build-record upload: it is a separate artifact upload that can fail the job
@@ -121,6 +276,39 @@ jobs:
           # BuildKit secret, mounted only for the two mvnw RUN steps (see Dockerfile).
           secrets: |
             packages_read_token=${{ secrets.PACKAGES_READ_TOKEN || secrets.GITHUB_TOKEN }}
-          tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.vars.outputs.tag }}
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          tags: ${{ steps.tags.outputs.tags }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ steps.tags.outputs.label_version }}
+            org.opencontainers.image.revision=${{ github.sha }}
+
+  github-release:
+    needs: [version, image]
+    if: needs.version.outputs.kind == 'release'
+    runs-on: ${{ fromJSON(github.event_name != 'pull_request' && github.event_name != 'pull_request_target' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/studio-v')) && vars.RUNS_ON_PUBLISH || '"ubuntu-latest"') }}
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ needs.version.outputs.version }}
+      COMMONS_VERSION: ${{ needs.version.outputs.commons_version }}
+    steps:
+      - name: Create the GitHub release (prerelease for a beta)
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "release $GITHUB_REF_NAME already exists; leaving it as it is"
+            exit 0
+          fi
+          prerelease=()
+          case "$VERSION" in
+            *-*) prerelease=(--prerelease) ;;
+          esac
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            "${prerelease[@]}" \
+            --latest=false \
+            --title "$GITHUB_REF_NAME" \
+            --notes "Image: $IMAGE_NAME:$VERSION. Built against net.hugmesh:hugmesh-commons:$COMMONS_VERSION."
