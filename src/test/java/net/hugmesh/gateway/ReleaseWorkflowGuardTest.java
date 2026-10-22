@@ -23,9 +23,12 @@ import static org.assertj.core.api.Assertions.assertThat;
  *   <li>The workflow has no {@code pull_request} / {@code pull_request_target} trigger. Its
  *       jobs may run on the self-hosted runner, and a pull request (above all one from a
  *       fork of a public repository) must never reach that runner through this file.</li>
- *   <li>Every job takes its runner from the guarded publish expression: the self-hosted
- *       labels in {@code vars.RUNS_ON_PUBLISH} only for {@code main} and {@code v*} tags,
- *       hosted {@code ubuntu-latest} otherwise. The older {@code vars.RUNS_ON} variable,
+ *   <li>version and github-release take their runner from the guarded publish expression:
+ *       the self-hosted labels in {@code vars.RUNS_ON_PUBLISH} only for {@code main} and
+ *       {@code v*} tags, hosted {@code ubuntu-latest} otherwise. The signed image job and
+ *       notify-site run on literal hosted {@code ubuntu-latest} (see
+ *       {@code ReleaseSignedImageGuardTest}): a published image is never built on the
+ *       self-hosted runner. The older {@code vars.RUNS_ON} variable,
  *       which pull-request jobs elsewhere also read, is never read here.</li>
  *   <li>The pom's own {@code <project><version>} is a published-style SemVer: never a
  *       SNAPSHOT and never {@code +build} metadata (OCI tags reject {@code +}). The
@@ -91,9 +94,13 @@ class ReleaseWorkflowGuardTest {
     void everyReleaseJob_usesTheGuardedPublishRunner_andNeverReadsRunsOn() throws Exception {
         Map<?, ?> jobs = (Map<?, ?>) workflow().get("jobs");
         assertThat(jobs).as("release.yml must have jobs").isNotEmpty();
+        assertThat(jobs.keySet().stream().map(String::valueOf).toList())
+                .containsExactly("version", "image", "github-release", "notify-site");
+        // The signed publish job and notify-site never run on the self-hosted runner.
+        java.util.Set<String> hosted = java.util.Set.of("image", "notify-site");
         jobs.forEach((name, job) -> assertThat(((Map<?, ?>) job).get("runs-on"))
-                .as("job '%s' must take its runner from the guarded publish expression", name)
-                .isEqualTo(PUBLISH_RUNS_ON));
+                .as("job '%s' runner", name)
+                .isEqualTo(hosted.contains(String.valueOf(name)) ? "ubuntu-latest" : PUBLISH_RUNS_ON));
         assertThat(READS_RUNS_ON.matcher(Files.readString(releaseWorkflow())).find())
                 .as("release.yml must not read vars.RUNS_ON (pull-request jobs elsewhere use it)")
                 .isFalse();
