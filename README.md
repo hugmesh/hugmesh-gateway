@@ -21,7 +21,7 @@ and the gateway validates them.
 The stack is Spring Boot 4.0.7 and Spring Cloud 2025.1.2 on Java 25, reactive
 throughout (WebFlux, reactive Cassandra, R2DBC Postgres). The gateway follows the
 unified platform baseline. It declares the shared
-[`hugmesh-commons`](https://github.com/hugmesh/hugmesh-commons) 2.1.0 artifact
+[`hugmesh-commons`](https://github.com/hugmesh/hugmesh-commons) 2.2.0-beta.1 artifact
 (`net.hugmesh.commons.*` security/tenancy) as a **direct, explicitly versioned
 dependency**. No source file imports it yet. The gateway keeps its own `Roles`,
 `DomainRegistry`, `CasdoorAuthorities` and `TenancyResourceServerConfig`, because its
@@ -76,8 +76,8 @@ State of `main` after the ecosystem unification and the auth-model change:
   `ADMIN` and `GAME-MASTER` bypass only inside their own domain. Authority-injection
   and cross-tenant BFLA hardening are shipped.
 - **CI is GitLab.** The main test/build/security pipeline runs on an in-cluster GitLab
-  instance that mirrors this repo. GitHub Actions hosts only a manual release workflow
-  (see *CI / security* below).
+  instance that mirrors this repo. GitHub Actions hosts only the release workflow,
+  which publishes the container image (see *Version and releases* below).
 
 ## Where it sits
 
@@ -515,12 +515,54 @@ DAST when `DAST_TARGET_URL` is set (see the `Makefile`).
 Run `./mvnw verify` locally before you open a pull request. *CI / security* below
 explains why GitHub Actions alone will not catch regressions yet.
 
+### Version and releases
+
+The version lives in one place: `<project><version>` in `pom.xml`, currently
+**`0.3.0-beta.1`**. It follows the org's beta scheme `MAJOR.MINOR.PATCH-beta.N`: `0.3`
+means the gateway has run live on the local mesh lanes with a recorded check, and N counts
+the betas published at that base. It is never a `-SNAPSHOT` and never has a `+build` part,
+because it becomes the image tag. `ReleaseWorkflowGuardTest` fails the build otherwise.
+
+The [release workflow](.github/workflows/release.yml) publishes
+`ghcr.io/hugmesh/hugmesh-gateway`:
+
+| Trigger | Image tags | GitHub release |
+|---|---|---|
+| push to `main`, or a manual run on `main` | `:main`, `:sha-<12>` | none |
+| push of tag `v<version>`, or a manual run on that tag | `:<version>`, `:beta`, `:sha-<12>` | prerelease, never marked latest |
+| anything else | refused | none |
+
+- A `v*` tag must equal the pom version and point at a commit on `main`, or the run
+  stops before building.
+- A published `:<version>` is never overwritten. To publish a fix, raise N in `pom.xml`
+  (`0.3.0-beta.2`), merge, and tag again.
+- `:latest` is never pushed for a beta. Only a final version (no `-`) would move it.
+- Before the build, the workflow checks that it can read `hugmesh-parent` and
+  `hugmesh-commons` from GitHub Packages, and that the exact `hugmesh-commons` version
+  pinned in `pom.xml` is published there. Publish order: build-config, parent, commons,
+  auth-core, then this gateway, then the be/fe/pki-gateway overlays, which build FROM an
+  exact gateway version.
+- Every job runs on the self-hosted runner named by the repository variable
+  `RUNS_ON_PUBLISH` (a JSON array of labels) only for `main` and `v*` tags, and on hosted
+  `ubuntu-latest` otherwise. Deleting that variable sends every job back to hosted runners.
+
+To cut a beta, on an up-to-date `main` whose pom says the version you mean:
+
+```bash
+git tag -a v0.3.0-beta.1 -m "hugmesh-gateway 0.3.0-beta.1"
+git push origin v0.3.0-beta.1
+```
+
+The tag push starts the release run. To re-run it for the same tag:
+`gh workflow run release.yml --repo hugmesh/hugmesh-gateway --ref v0.3.0-beta.1`.
+
 ### CI / security
 
 The main CI runs on an in-cluster **GitLab** instance that mirrors this GitHub repo
-(`.gitlab-ci.yml`). GitHub Actions has one workflow: a manual, `workflow_dispatch`-only
-[release workflow](.github/workflows/release.yml) that builds the container image and
-publishes it to GHCR.
+(`.gitlab-ci.yml`). GitHub Actions has one workflow: the
+[release workflow](.github/workflows/release.yml), which builds the container image and
+publishes it to GHCR on a push to `main` or a `v*` tag (see *Version and releases*). It
+has no pull-request trigger, so it does not test pull requests.
 
 The GitLab stages are `test → build → pentest`. A former `security` stage was dropped
 once it was verified dead: its only job, the inline `dependency-check`, had moved onto
