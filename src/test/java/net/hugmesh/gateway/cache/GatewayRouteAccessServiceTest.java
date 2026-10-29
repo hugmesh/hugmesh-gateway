@@ -1644,10 +1644,13 @@ class GatewayRouteAccessServiceTest {
 
     @Test
     void canonicalSeed_feGateway_gamesAdminUi_isGamesAdminComposite() {
-        // fe-gateway carries ONLY the games namespace admin UI row
-        // /games/admin/** -> ROLE_GAMES_ADMIN (the portal floor lives on be). A plain
-        // ROLE_USER (and a plain ADMIN, and a plain GAMES) is DENIED; only the
-        // composite ROLE_GAMES_ADMIN reaches it.
+        // The games namespace admin UI row /games/admin/** -> ROLE_GAMES_ADMIN on
+        // the fe tier. Since the shell-mounted games UI (2026-10-28) the fe seed
+        // ALSO carries the /games/** and /games/api/** floors beneath it, so this
+        // row now has to WIN by longest match rather than being the only games
+        // row: a plain ROLE_USER, a plain ADMIN AND a plain GAMES holder are all
+        // DENIED on the admin HTML path; only the composite ROLE_GAMES_ADMIN
+        // reaches it.
         var seed = CanonicalSeed.forGateway("hugmesh-fe-gateway");
         var s = new GatewayRouteAccessService(null, null, "hugmesh-fe-gateway", true, false, null);
         s.primeForTest(seed);
@@ -1657,10 +1660,97 @@ class GatewayRouteAccessServiceTest {
         assertThat(s.decide("/games/admin/dashboard", "default", List.of("u1"), List.of("ROLE_USER", "ROLE_ADMIN")))
             .as("plain ROLE_ADMIN must NOT satisfy the games admin composite")
             .isEqualTo(Decision.DENY);
+        assertThat(s.decide("/games/admin/dashboard", "default", List.of("u1"), List.of("ROLE_USER", "ROLE_GAMES")))
+            .as("the /games/** floor must NOT widen onto the admin HTML path (longest match)")
+            .isEqualTo(Decision.DENY);
         assertThat(s.decide("/games/admin/dashboard", "default", List.of("u1"),
                 List.of("ROLE_USER", "ROLE_GAMES_ADMIN")))
             .as("ROLE_GAMES_ADMIN must reach the games admin UI")
             .isEqualTo(Decision.ALLOW);
+    }
+
+    /** The fe games rows the cross-repo contract "games member + games admin
+     *  screens" (2026-10-28) names: pattern -> role, allow=true, on BOTH the
+     *  baked floor and the compose Postgres seed. */
+    private static final List<String[]> FE_GAMES_ROWS = List.of(
+            new String[] {"/games/admin/**",     "ROLE_GAMES_ADMIN"},
+            new String[] {"/games/api/admin/**", "ROLE_GAMES_ADMIN"},
+            new String[] {"/games/api/**",       "ROLE_GAMES"},
+            new String[] {"/games/api/**",       "ROLE_ADMIN"},
+            new String[] {"/games/api/**",       "ROLE_MOD"},
+            new String[] {"/games/**",           "ROLE_GAMES"},
+            new String[] {"/games/**",           "ROLE_ADMIN"},
+            new String[] {"/games/**",           "ROLE_MOD"});
+
+    @Test
+    void feGateway_gamesSurface_memberFloorAndAdminApi_inBothSeeds() {
+        // The games-member bug, route-access half. The shell mounts the `games`
+        // native-federation remote at /games (remoteEntry.json + chunks served
+        // under /games/ by the fe route `games-ui`) and the remote calls the games
+        // BFF at /games/api/** (fe route `games-bff`, StripPrefix=1). Before these
+        // rows the fe seed matched NOTHING under /games/ except /games/admin/**, so
+        // a games member's remoteEntry.json and catalog call were NO_RULE
+        // (forwarded on the coarse floor, ungoverned), while on a DB-backed stack
+        // the posture depended on whatever rows an admin had added. Now: the
+        // floor is governed (anonymous + plain ROLE_USER DENY), ROLE_GAMES and its
+        // two paired supersets reach it, and the two admin rows keep winning their
+        // own subtrees by longest match — on the baked floor AND on the compose
+        // seed that REPLACES it once Postgres loads.
+        var seeds = java.util.Map.of(
+                "CanonicalSeed.fe", CanonicalSeed.forGateway("hugmesh-fe-gateway"),
+                "compose/route-access-seed.sql", composeSeedRulesFor("hugmesh-fe-gateway"));
+        for (var e : seeds.entrySet()) {
+            var rules = e.getValue();
+            for (String[] row : FE_GAMES_ROWS) {
+                assertThat(rules)
+                    .as("%s must carry fe row %s -> %s (allow)", e.getKey(), row[0], row[1])
+                    .anyMatch(r -> row[0].equals(r.urlPattern()) && row[1].equals(r.role()) && r.allow());
+            }
+            var s = new GatewayRouteAccessService(null, null, "hugmesh-fe-gateway", true, false, null);
+            s.primeForTest(rules);
+
+            // Member floor: the remote bundle, the shell deep link, and the BFF member API.
+            for (String path : List.of("/games/remoteEntry.json", "/games/chunk-ABC123.js",
+                    "/games", "/games/play/chess", "/games/api/games", "/games/api/games/chess/launch",
+                    "/games/api/federation/manifest")) {
+                assertThat(s.decide(path, "default", List.of(), List.of()))
+                    .as("%s: %s must RESOLVE to a rule (never NO_RULE) and deny anonymous", e.getKey(), path)
+                    .isEqualTo(Decision.DENY);
+                assertThat(s.decide(path, "default", List.of("u1"), List.of("ROLE_USER")))
+                    .as("%s: a plain ROLE_USER holds no games-access capability on %s", e.getKey(), path)
+                    .isEqualTo(Decision.DENY);
+                for (String role : List.of("ROLE_GAMES", "ROLE_ADMIN", "ROLE_MOD")) {
+                    assertThat(s.decide(path, "default", List.of("u1"), List.of("ROLE_USER", role)))
+                        .as("%s: %s must reach %s", e.getKey(), role, path)
+                        .isEqualTo(Decision.ALLOW);
+                }
+            }
+
+            // Admin API and admin HTML path: composite only, by longest match.
+            for (String path : List.of("/games/api/admin/stats", "/games/api/admin/sessions/x",
+                    "/games/admin", "/games/admin/sessions")) {
+                assertThat(s.decide(path, "default", List.of(), List.of()))
+                    .as("%s: %s must be GOVERNED, not NO_RULE", e.getKey(), path)
+                    .isEqualTo(Decision.DENY);
+                for (String role : List.of("ROLE_USER", "ROLE_GAMES", "ROLE_ADMIN", "ROLE_MOD")) {
+                    assertThat(s.decide(path, "default", List.of("u1"), List.of("ROLE_USER", role)))
+                        .as("%s: %s alone must NOT reach %s (the floor must not widen onto it)",
+                                e.getKey(), role, path)
+                        .isEqualTo(Decision.DENY);
+                }
+                assertThat(s.decide(path, "default", List.of("u1"), List.of("ROLE_USER", "ROLE_GAMES_ADMIN")))
+                    .as("%s: ROLE_GAMES_ADMIN must reach %s", e.getKey(), path)
+                    .isEqualTo(Decision.ALLOW);
+            }
+
+            // The games rows must not leak onto the neighbouring fe surfaces.
+            assertThat(s.decide("/bff/me/profile", "default", List.of("u1"), List.of("ROLE_GAMES")))
+                .as("%s: ROLE_GAMES alone must not reach /bff/me/**", e.getKey())
+                .isEqualTo(Decision.DENY);
+            assertThat(s.decide("/admin/x", "default", List.of("u1"), List.of("ROLE_GAMES")))
+                .as("%s: ROLE_GAMES alone must not reach the platform /admin/** UI", e.getKey())
+                .isEqualTo(Decision.DENY);
+        }
     }
 
     @Test
@@ -1670,7 +1760,10 @@ class GatewayRouteAccessServiceTest {
         // datastore-unreachable fallback governs the games surface identically:
         //   be-gateway: /games/api/admin/** -> ROLE_GAMES_ADMIN
         //               /games/** -> {ROLE_GAMES, ROLE_ADMIN, ROLE_MOD}
-        //   fe-gateway: /games/admin/** -> ROLE_GAMES_ADMIN
+        //   fe-gateway: /games/admin/** -> ROLE_GAMES_ADMIN, plus (since the
+        //               shell-mounted games UI, 2026-10-28) the same four-row
+        //               shape as be under /games/api/** and /games/** — pinned
+        //               row for row by feGateway_gamesSurface_memberFloorAndAdminApi_inBothSeeds.
         record Expect(String pattern, String role) {}
         var be = CanonicalSeed.forGateway("hugmesh-be-gateway");
         for (Expect e : List.of(
