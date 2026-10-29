@@ -90,6 +90,22 @@ class RolesTest {
     }
 
     @Test
+    void isGames_matchesBothSpellings_andNotGameMasterOrGamesAdminAlone() {
+        // ROLE_GAMES (hugmesh.net seed spelling) and bare `games` both canonicalize
+        // to GAMES; the platform-admin GAME-MASTER and the derived composite
+        // GAMES_ADMIN are DIFFERENT tokens and must not satisfy the games floor
+        // on their own.
+        assertThat(Roles.isGames(jwtWith(Map.of("roles", List.of("ROLE_GAMES"))))).isTrue();
+        assertThat(Roles.isGames(jwtWith(Map.of("roles", List.of("games"))))).isTrue();
+        assertThat(Roles.isGames(jwtWith(Map.of("roles", List.of(Map.of("name", "ROLE_GAMES")))))).isTrue();
+        assertThat(Roles.isGames(jwtWith(Map.of("roles", List.of("ROLE_GAME-MASTER"))))).isFalse();
+        assertThat(Roles.isGames(jwtWith(Map.of("roles", List.of("ROLE_GAMES_ADMIN"))))).isFalse();
+        assertThat(Roles.isGames(jwtWith(Map.of("roles", List.of("ROLE_USER", "ROLE_ADMIN"))))).isFalse();
+        assertThat(Roles.isGames(jwtWith(Map.of()))).isFalse();
+        assertThat(Roles.isGames(null)).isFalse();
+    }
+
+    @Test
     void canonicalRoleName_stripsOneLeadingRolePrefix_caseInsensitive() {
         assertThat(Roles.canonicalRoleName("ROLE_ADMIN")).isEqualTo("ADMIN");
         assertThat(Roles.canonicalRoleName("role_mod")).isEqualTo("MOD");

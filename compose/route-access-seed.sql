@@ -218,12 +218,27 @@ INSERT INTO gateway_route_access (gateway, url_pattern, role, allow) VALUES
   -- (route-access/initdb/20-schema.sql) + the baked CanonicalSeed.fe() rows.
   ('hugmesh-fe-gateway',   '/character-forge/**',     'ROLE_USER', true),
   ('hugmesh-fe-gateway',   '/bff/character-forge/**', 'ROLE_USER', true),
-  -- hugmesh-games (OPTIONAL slug `games`) namespace admin UI, namespaced under
-  -- /games/** so it does not collide with the platform /admin/** row above. Same
-  -- games + (admin|mod) gate as the be-gateway games rows: keyed on the DERIVED
-  -- composite ROLE_GAMES_ADMIN ONLY, so a single role is default-deny and the one
-  -- allow row encodes the AND. Mirrors the baked CanonicalSeed.fe() row.
-  ('hugmesh-fe-gateway',   '/games/admin/**',       'ROLE_GAMES_ADMIN', true),
+  -- hugmesh-games (OPTIONAL slug `games`) at the public browser door. Since the
+  -- shell-mounted games UI (cross-repo contract "games member + games admin
+  -- screens", 2026-10-28) the fe tier fronts the games namespace admin UI HTML
+  -- path, the games BFF admin API (fe route `games-bff`, StripPrefix=1), the
+  -- games BFF member API, and the `games` native-federation remote (fe route
+  -- `games-ui`: remoteEntry.json + chunks live under /games/, never under
+  -- /games/admin/). The two admin rows carry the same games + (admin|mod) gate as
+  -- the be-gateway games rows: keyed on the DERIVED composite ROLE_GAMES_ADMIN
+  -- ONLY, so a single role is default-deny and the one allow row encodes the AND;
+  -- being LONGER they win longest-pattern-match over the floors beneath them.
+  -- The two floors key on the network-wide ROLE_GAMES access role with ROLE_ADMIN
+  -- and ROLE_MOD PAIRED (the converter does not auto-grant ROLE_GAMES to them).
+  -- Mirrors the baked CanonicalSeed.fe() rows + the cluster seed, byte-for-byte.
+  ('hugmesh-fe-gateway',   '/games/admin/**',       'ROLE_GAMES_ADMIN', true),  -- games namespace admin UI (wins, longer)
+  ('hugmesh-fe-gateway',   '/games/api/admin/**',   'ROLE_GAMES_ADMIN', true),  -- games BFF admin API (wins, longer)
+  ('hugmesh-fe-gateway',   '/games/api/**',         'ROLE_GAMES',       true),  -- games BFF member API (games-access)
+  ('hugmesh-fe-gateway',   '/games/api/**',         'ROLE_ADMIN',       true),  -- (admins superset)
+  ('hugmesh-fe-gateway',   '/games/api/**',         'ROLE_MOD',         true),  -- (mods superset)
+  ('hugmesh-fe-gateway',   '/games/**',             'ROLE_GAMES',       true),  -- games remote + deep links (games-access)
+  ('hugmesh-fe-gateway',   '/games/**',             'ROLE_ADMIN',       true),  -- (admins superset)
+  ('hugmesh-fe-gateway',   '/games/**',             'ROLE_MOD',         true),  -- (mods superset)
   -- SERVICE-ONLY INTERNAL INGEST SURFACES: explicit DENY. The fe route table
   -- Ant-matches `/bff/user/**` -> user-bff, `/bff/mesh/**` -> mesh-bff and the
   -- `/bff/**` -> admin-bff catch-all, so those `**` predicates DO route the
