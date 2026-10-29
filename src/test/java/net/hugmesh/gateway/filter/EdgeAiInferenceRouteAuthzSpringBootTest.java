@@ -13,6 +13,8 @@ import org.springframework.http.MediaType;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.web.reactive.server.WebTestClient;
+import net.hugmesh.gateway.cache.GatewayRouteAccessService;
+import net.hugmesh.gateway.cache.GatewayRouteAccessService.Decision;
 import net.hugmesh.gateway.testsupport.TestIssuer;
 
 import java.io.IOException;
@@ -35,7 +37,10 @@ import static org.assertj.core.api.Assertions.assertThat;
  * (Host + {@code Path=/v1/synthesize/**}), then the {@code edge-ai} CATCHALL with a
  * Host predicate and NO Path predicate. The route-access authority is the
  * be-gateway's baked {@code CanonicalSeed.be()} (no datastore in this context),
- * whose {@code /v1/** -> ROLE_USER} row governs the catchall. Every signed-in
+ * whose {@code /v1/** -> ROLE_USER} row governs the catchall (pinned against the
+ * route-access service itself, because over HTTP an ungoverned path is forwarded
+ * exactly like an allowed one; see
+ * {@link #theV1Rows_governEveryV1Path_soNoneFallsThroughAsUngoverned}). Every signed-in
  * principal holds {@code ROLE_USER} (the converter floor), so that row admits any
  * signed-in account and anonymous traffic is stopped by the coarse
  * {@code authenticated()} floor; see
@@ -112,6 +117,9 @@ class EdgeAiInferenceRouteAuthzSpringBootTest {
 
     @Autowired
     WebTestClient http;
+
+    @Autowired
+    GatewayRouteAccessService routeAccess;
 
     @BeforeEach
     void reset() {
@@ -202,6 +210,31 @@ class EdgeAiInferenceRouteAuthzSpringBootTest {
         get("/v1/analyze/image", null).expectStatus().isUnauthorized();
         get("/v1/synthesize/voices", null).expectStatus().isUnauthorized();
         assertThat(STUB.hits).containsExactly("GET /v1/analyze/image", "GET /v1/synthesize/voices");
+    }
+
+    // ── the /v1 rows are GOVERNING, not merely absent-and-forwarded ───────
+
+    @Test
+    void theV1Rows_governEveryV1Path_soNoneFallsThroughAsUngoverned() {
+        // The HTTP cases above cannot tell ALLOW from NO_RULE: GatewayRouteAccessFilter
+        // forwards both, so deleting the /v1/** row from CanonicalSeed.be() left every
+        // case green. Ask the same service bean the filter asks. ROLE_USER must be an
+        // ALLOW (a row decides), and a principal holding neither ROLE_USER nor any
+        // other granting role must be a DENY (a row governs and refuses), on the
+        // catchall and on both sub-routes.
+        // RED when the /v1/** base row is removed from CanonicalSeed.be(). Removing
+        // /v1/analyze/** or /v1/synthesize/** alone stays green, and should: the base
+        // row then decides those paths the same way (same single ROLE_USER floor), so
+        // no outcome changes. They only become observable if they ever diverge.
+        // A live run with ROUTE_ACCESS_R2DBC_URL asks the datastore's rows instead.
+        List<String> ids = List.of("mesh-user");
+        for (String path : List.of("/v1/models", "/v1/chat/completions", "/v1/embeddings",
+                "/v1/analyze/image", "/v1/synthesize/voices")) {
+            assertThat(routeAccess.decide(path, "meshx", ids, List.of("ROLE_USER")))
+                    .as("ROLE_USER on %s", path).isEqualTo(Decision.ALLOW);
+            assertThat(routeAccess.decide(path, "meshx", ids, List.of("ROLE_MATRIX")))
+                    .as("ROLE_MATRIX alone on %s", path).isEqualTo(Decision.DENY);
+        }
     }
 
     // ── live: a real completion through the gateway ────────────────────────────
