@@ -168,6 +168,110 @@ class ResourceAccessFilterTest {
         assertThat(downstreamCalled).isTrue();
     }
 
+    // ── ROLE_GAMES floor for "game" tuples (games member + games admin screens
+    //    contract, 2026-10-28) ──────────────────────────────────────────────────
+
+    /** The games-member bug: a ROLE_GAMES holder asking for a game bundle the
+     *  catalog offered them was 403'd with X-Resource-Denied: game:chess, because
+     *  the per-slug grant tuples this filter consults have no writer. The
+     *  network-wide games-access role IS the floor; zero grant lookups happen. */
+    @Test
+    void gamesRole_reachesGameBundle_withZeroGrants() {
+        // No authz stubs at all: the floor must forward BEFORE any grant lookup.
+        Jwt gamesJwt = jwt("e2e-gamesonly", List.of(Map.of("name", "ROLE_GAMES"), Map.of("name", "ROLE_USER")));
+        AbstractAuthenticationToken auth = authFor(gamesJwt, "GAMES");
+        var ex = MockServerHttpRequest.get("/_remotes/wasm-fragment/chess/index.html").build();
+        MockServerWebExchange mwex = MockServerWebExchange.from(ex);
+        filter.filter(new ExchangeWithPrincipal(mwex, auth), forwarded).block();
+
+        assertThat(downstreamCalled).as("games member must reach the game bundle").isTrue();
+        assertThat(mwex.getResponse().getStatusCode()).isNotEqualTo(HttpStatus.FORBIDDEN);
+        assertThat(mwex.getResponse().getHeaders().getFirst("X-Resource-Denied")).isNull();
+        Mockito.verifyNoInteractions(authz);
+    }
+
+    /** The floor also covers the /api/games/{slug}/… game tuple (launch), with
+     *  the bare `games` claim spelling Casdoor's object shape may carry. */
+    @Test
+    void gamesRole_bareSpelling_reachesGameLaunch_withZeroGrants() {
+        Jwt gamesJwt = jwt("e2e-gamesonly", List.of(Map.of("name", "games")));
+        AbstractAuthenticationToken auth = authFor(gamesJwt, "GAMES");
+        var ex = MockServerHttpRequest.post("/api/games/chess/launch").build();
+        MockServerWebExchange mwex = MockServerWebExchange.from(ex);
+        filter.filter(new ExchangeWithPrincipal(mwex, auth), forwarded).block();
+
+        assertThat(downstreamCalled).isTrue();
+        Mockito.verifyNoInteractions(authz);
+    }
+
+    /** A plain ROLE_USER holds no games access: still grant-gated, still 403 +
+     *  the game:<slug> tuple in the header. */
+    @Test
+    void userRole_withoutGames_isStillRejected_onGameBundle() {
+        when(authz.isGranted(anyString(), anyString(), anyString())).thenReturn(false);
+        when(authz.hasAnyRoleGrant(anyString(), anyString(), any())).thenReturn(false);
+
+        Jwt userJwt = jwt("e2e-user", List.of(Map.of("name", "ROLE_USER")));
+        AbstractAuthenticationToken auth = authFor(userJwt);
+        var ex = MockServerHttpRequest.get("/_remotes/wasm-fragment/chess/index.html").build();
+        MockServerWebExchange mwex = MockServerWebExchange.from(ex);
+        filter.filter(new ExchangeWithPrincipal(mwex, auth), forwarded).block();
+
+        assertThat(downstreamCalled).isFalse();
+        assertThat(mwex.getResponse().getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
+        assertThat(mwex.getResponse().getHeaders().getFirst("X-Resource-Denied"))
+            .isEqualTo("game:chess");
+    }
+
+    /** The floor is scoped to the "game" resource type: a games member on a
+     *  session tuple is still grant-gated (and denied without a grant). */
+    @Test
+    void gamesRole_onSessionTuple_isStillGrantGated() {
+        when(authz.isGranted(anyString(), anyString(), anyString())).thenReturn(false);
+        when(authz.hasAnyRoleGrant(anyString(), anyString(), any())).thenReturn(false);
+
+        Jwt gamesJwt = jwt("e2e-gamesonly", List.of(Map.of("name", "ROLE_GAMES")));
+        AbstractAuthenticationToken auth = authFor(gamesJwt, "GAMES");
+        var ex = MockServerHttpRequest.get("/api/sessions/abc/state").build();
+        MockServerWebExchange mwex = MockServerWebExchange.from(ex);
+        filter.filter(new ExchangeWithPrincipal(mwex, auth), forwarded).block();
+
+        assertThat(downstreamCalled).as("session tuples are NOT covered by the games floor").isFalse();
+        assertThat(mwex.getResponse().getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
+        assertThat(mwex.getResponse().getHeaders().getFirst("X-Resource-Denied"))
+            .isEqualTo("session:abc");
+        Mockito.verify(authz).isGranted("session", "abc", "e2e-gamesonly");
+    }
+
+    /** ...and a games member WITH a session grant is forwarded through the
+     *  unchanged grant path. */
+    @Test
+    void gamesRole_onSessionTuple_withGrant_isForwarded() {
+        when(authz.isGranted("session", "abc", "e2e-gamesonly")).thenReturn(true);
+
+        Jwt gamesJwt = jwt("e2e-gamesonly", List.of(Map.of("name", "ROLE_GAMES")));
+        AbstractAuthenticationToken auth = authFor(gamesJwt, "GAMES");
+        var ex = MockServerHttpRequest.get("/api/sessions/abc/state").build();
+        MockServerWebExchange mwex = MockServerWebExchange.from(ex);
+        filter.filter(new ExchangeWithPrincipal(mwex, auth), forwarded).block();
+
+        assertThat(downstreamCalled).isTrue();
+    }
+
+    /** Admin on a game bundle: unchanged — the admin bypass still fires first,
+     *  with zero grant lookups. */
+    @Test
+    void adminRole_onGameBundle_unchanged_bypassesWithZeroGrants() {
+        Jwt adminJwt = jwt("e2e-adminonly", List.of(Map.of("name", "ROLE_ADMIN")));
+        AbstractAuthenticationToken auth = authFor(adminJwt, "ADMIN");
+        var ex = MockServerHttpRequest.get("/_remotes/wasm-fragment/chess/index.html").build();
+        MockServerWebExchange mwex = MockServerWebExchange.from(ex);
+        filter.filter(new ExchangeWithPrincipal(mwex, auth), forwarded).block();
+
+        assertThat(downstreamCalled).isTrue();
+        Mockito.verifyNoInteractions(authz);
+    }
+
     @Test
     void nonResourcePath_isForwardedWithoutCheck() {
         Jwt playerJwt = jwt("tw-player-001", List.of(Map.of("name", "player")));

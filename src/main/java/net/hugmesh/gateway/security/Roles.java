@@ -172,6 +172,19 @@ public final class Roles {
         return has(jwt, "GAME-MASTER") || has(jwt, "GAME_MASTER");
     }
 
+    /** True iff the principal carries the network-wide games-access role
+     *  {@code ROLE_GAMES} (the hugmesh.net seed spelling) or bare {@code games}
+     *  — {@link #has} strips one leading {@code ROLE_} so both match. The
+     *  DERIVED composite {@code ROLE_GAMES_ADMIN} canonicalizes to
+     *  {@code GAMES_ADMIN} and does NOT match on its own; that is fine, because
+     *  the composite is only ever materialized for a principal that already
+     *  holds {@code ROLE_GAMES}. Distinct from {@link #isGameMaster}, the
+     *  platform-admin role. Gates the {@code game} resource-type floor in
+     *  {@code ResourceAccessFilter}. */
+    public static boolean isGames(Jwt jwt) {
+        return has(jwt, "GAMES");
+    }
+
     /** True iff the principal carries the infra super-role {@code SUPERADMIN}.
      *  The ONLY role exempt from the gateway's per-domain bypass scoping —
      *  SUPERADMIN reaches every surface in every brand (the infra control plane).

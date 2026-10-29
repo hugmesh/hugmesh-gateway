@@ -45,6 +45,12 @@ import java.util.regex.Pattern;
  *       provider" contract: an admin token issued by Casdoor sails
  *       through every resource check regardless of whether an
  *       External-Authorization header is also present.</li>
+ *   <li>{@code ROLE_GAMES} on the internal JWT, for {@code game} tuples
+ *       ONLY — forwards without a grant lookup. The network-wide games-access
+ *       role is the floor the {@code /games/**} route-access rows already
+ *       grant; per-game policy lives in the games BFF ({@code game_access}),
+ *       and no writer exists for per-slug grant tuples. {@code session}
+ *       tuples are NOT covered by this step.</li>
  *   <li>Cassandra-cached user-specific grant ({@code <type>:<id>:<user>}).</li>
  *   <li>Cassandra-cached all-users grant ({@code <type>:<id>:*}).</li>
  *   <li>Cassandra-cached role grant for any role the user holds
@@ -129,6 +135,21 @@ public class ResourceAccessFilter implements WebFilter, Ordered {
                 // required. This is the explicit contract for "admin
                 // authorization works without an external provider".
                 if (auth.getPrincipal() instanceof Jwt jwt && (Roles.isAdmin(jwt) || Roles.isGameMaster(jwt))) {
+                    return chain.filter(exchange);
+                }
+                // ROLE_GAMES floor for the "game" resource type ONLY. ROLE_GAMES is the
+                // network-wide games-access role: the /games/** route-access floor on
+                // both tiers already says a holder may reach the games surface, so a
+                // games member asking for a game bundle (/_remotes/wasm-fragment/<slug>/…)
+                // or a game endpoint (/api/games/<slug>/…) must not ALSO need a
+                // per-slug grant tuple here. Nothing writes those tuples — grant()
+                // has no writer — so without this floor every games member was
+                // 403'd with X-Resource-Denied: game:<slug> on the very bundle the
+                // catalog just offered them. Per-game visibility/launch policy is
+                // enforced in the games BFF (game_access: catalog filter + launch
+                // 403), not by per-slug gateway grants. "session" tuples and
+                // principals that do not hold ROLE_GAMES stay on the grant path below.
+                if ("game".equals(tuple.type()) && auth.getPrincipal() instanceof Jwt j && Roles.isGames(j)) {
                     return chain.filter(exchange);
                 }
                 String userId = (auth.getPrincipal() instanceof Jwt jwt)

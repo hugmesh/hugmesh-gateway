@@ -594,15 +594,44 @@ final class CanonicalSeed {
                 // fallback.
                 r(FE, "/character-forge/**",     "ROLE_USER"),
                 r(FE, "/bff/character-forge/**", "ROLE_USER"),
-                // hugmesh-games (OPTIONAL slug `games`) namespace admin UI,
-                // namespaced under /games/** so it does NOT collide with the
-                // platform /admin/** row above. Same games + (admin|mod) gate:
-                // keyed on the DERIVED composite ROLE_GAMES_ADMIN ONLY
-                // (= ROLE_GAMES intersect (ROLE_ADMIN union ROLE_MOD)), so a single
-                // role is default-deny and the one allow row encodes the AND.
-                // Mirrors the cluster Postgres seed (fe-gateway carries ONLY this
-                // games row; the games portal floor lives on the be-gateway host).
-                r(FE, "/games/admin/**",    "ROLE_GAMES_ADMIN"), // games namespace admin UI (games + (admin|mod) ONLY)
+                // ── hugmesh-games (OPTIONAL slug `games`) at the PUBLIC BROWSER DOOR ──
+                // Since the shell-mounted games UI (cross-repo contract "games member
+                // + games admin screens", 2026-10-28) the fe tier fronts THREE games
+                // surfaces, all under the apex /games/ prefix:
+                //   /games/admin/**      the games namespace admin UI HTML path —
+                //                        games + (admin|mod) gate, keyed on the
+                //                        DERIVED composite ROLE_GAMES_ADMIN ONLY
+                //                        (= ROLE_GAMES intersect (ROLE_ADMIN union
+                //                        ROLE_MOD)), so a single role is default-deny
+                //                        and the one allow row encodes the AND;
+                //   /games/api/admin/**  the games BFF admin API (fe route `games-bff`,
+                //                        StripPrefix=1 -> hugmesh-games-bff /api/admin)
+                //                        — the SAME composite gate as the be-gateway's
+                //                        /games/api/admin/** row;
+                //   /games/api/**        the games BFF member API (catalog, launch,
+                //                        federation manifest) — the games-access floor;
+                //   /games/**            the `games` native-federation remote
+                //                        (remoteEntry.json + hashed chunks, fe route
+                //                        `games-ui`) and the shell's deep-link paths.
+                // The remote's bundle lives under /games/, NEVER under /games/admin/,
+                // so the longer admin rows keep gating only the admin HTML path and
+                // the admin API while the floor governs everything else. Same floor
+                // shape as the be-gateway rows: ROLE_GAMES is the network-wide
+                // games-access role (a games BAN is role removal -> governed-but-
+                // ungranted -> DENY); ROLE_ADMIN and ROLE_MOD are PAIRED supersets
+                // the converter does NOT auto-grant ROLE_GAMES to. Longest-pattern-
+                // match keeps the two admin rows deciding their own subtrees.
+                // DUAL-WRITE PARTNERS (byte-for-byte on pattern, role, allow):
+                // compose/route-access-seed.sql and the generator cluster seed
+                // specs/cluster/manifests/route-access/initdb/20-schema.sql.
+                r(FE, "/games/admin/**",     "ROLE_GAMES_ADMIN"), // games namespace admin UI (games + (admin|mod) ONLY; wins, longer)
+                r(FE, "/games/api/admin/**", "ROLE_GAMES_ADMIN"), // games BFF admin API (games + (admin|mod) ONLY; wins, longer)
+                r(FE, "/games/api/**",       "ROLE_GAMES"),       // games BFF member API (games-access)
+                r(FE, "/games/api/**",       "ROLE_ADMIN"),       // (admins superset)
+                r(FE, "/games/api/**",       "ROLE_MOD"),         // (mods superset)
+                r(FE, "/games/**",           "ROLE_GAMES"),       // games remote + deep links (games-access)
+                r(FE, "/games/**",           "ROLE_ADMIN"),       // (admins superset)
+                r(FE, "/games/**",           "ROLE_MOD"),         // (mods superset)
                 // ── SERVICE-ONLY INTERNAL INGEST SURFACES: explicit DENY ──────
                 // The fe route table (generator specs/cluster/apps/20-gateway-fe.yaml)
                 // carries `/bff/user/**` -> user-bff, `/bff/mesh/**` -> mesh-bff and a
