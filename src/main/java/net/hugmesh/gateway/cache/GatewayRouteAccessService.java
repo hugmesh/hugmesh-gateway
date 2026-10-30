@@ -45,6 +45,23 @@ import java.util.List;
  *       enforcement is never silently absent.</li>
  * </ul>
  *
+ * <p><b>An EMPTY load is never authoritative (hugmesh-gateway#61).</b> A refresh
+ * result with zero rows for this gateway, from EITHER source, never replaces the
+ * current snapshot: the {@link CanonicalSeed} floor at cold start, or the last
+ * non-empty load after that. The seed is never empty for any gateway name (the
+ * baked pki/be/fe tiers carry 3/32/44 rows, the route-access database seed
+ * 4/60/95, and an unknown name gets a closed {@code /** -> ROLE_ADMIN} floor),
+ * so a gateway with zero rules is never an intended state. It is what a fresh
+ * Cassandra cache returns while Postgres rejects the gateway's login, and
+ * installing it made every path {@code NO_RULE}, so the gate failed OPEN. A NON-empty load is installed in
+ * full, so an admin deleting some rows still takes effect on the next tick;
+ * deleting EVERY row of a gateway is refused and reported.
+ *
+ * <p><b>Degraded state.</b> While a datastore is wired but the authoritative one
+ * (Postgres when wired, else the Cassandra cache) did not supply this tick's
+ * snapshot, {@link #degradedReason()} is non-null, the transition is logged at
+ * ERROR, and {@code RouteAccessHealthIndicator} reports {@code DOWN}.
+ *
  * <p><b>Role derivation.</b> The {@code role} column holds Casdoor roles in the
  * Spring authority form ({@code ROLE_USER}, {@code ROLE_ADMIN}, …) — exactly the
  * authorities the {@code casdoorAuthoritiesConverter} derives from the JWT
@@ -124,6 +141,13 @@ public class GatewayRouteAccessService {
     private volatile List<Rule> rules = List.of();
     private volatile Instant lastRefreshAt = Instant.EPOCH;
     private volatile String source = "seed";
+    /** Why the gateway is NOT enforcing a fresh load from its authoritative source,
+     *  or {@code null} when it is (or when no datastore is wired, so the seed IS the
+     *  authority). Read by {@code RouteAccessHealthIndicator}. */
+    private volatile String degradedReason = null;
+    private volatile Instant degradedSince = null;
+    /** The snapshot source last logged as degraded (log-on-change bookkeeping). */
+    private volatile String degradedEnforcing = null;
 
     public GatewayRouteAccessService(
             @Nullable ReactiveCassandraTemplate template,
@@ -154,6 +178,11 @@ public class GatewayRouteAccessService {
         // fail-open even before the first Postgres/Cassandra round-trip.
         this.rules = CanonicalSeed.forGateway(gatewayName);
         this.source = "seed";
+        if (datastoreWired()) {
+            // Not yet loaded: the seed is a floor, not the configured authority.
+            this.degradedReason = authoritativeSource() + " not loaded yet; enforcing the seed floor";
+            this.degradedSince = Instant.now();
+        }
         refreshNow().subscribe();
     }
 
@@ -347,6 +376,38 @@ public class GatewayRouteAccessService {
         return rules.size();
     }
 
+    /** {@code false} when {@code app.route-access.enabled=false} (the gate is off). */
+    public boolean isEnabled() {
+        return enabled;
+    }
+
+    /** Why the current snapshot is not a fresh load from the authoritative source
+     *  ({@code null} when it is, or when no datastore is wired). See the class doc. */
+    @Nullable
+    public String degradedReason() {
+        return degradedReason;
+    }
+
+    /** When the current degraded spell began ({@code null} when not degraded). */
+    @Nullable
+    public Instant degradedSince() {
+        return degradedSince;
+    }
+
+    /** The source this gateway treats as authoritative: {@code postgres} when the
+     *  source of truth is wired (including a set-but-invalid URL, which
+     *  {@code RouteAccessR2dbcConfig} wires as an always-failing repository),
+     *  {@code cassandra} when only the cache is, else {@code seed}. */
+    public String authoritativeSource() {
+        if (routeAccessRepository != null) return "postgres";
+        if (cql != null) return "cassandra";
+        return "seed";
+    }
+
+    private boolean datastoreWired() {
+        return routeAccessRepository != null || cql != null;
+    }
+
     /** This gateway's instance name ({@code spring.application.name}). */
     public String gatewayName() {
         return gatewayName;
@@ -380,7 +441,7 @@ public class GatewayRouteAccessService {
         if (!enabled) return true;                 // gate never enforced -> nothing to prime
         boolean datastoreWired = datastoreWiredOverrideForTest != null
                 ? datastoreWiredOverrideForTest
-                : ((routeAccessRepository != null) || (cql != null));
+                : datastoreWired();
         if (!datastoreWired) return true;          // seed IS authoritative (no mfa_required rows)
         return lastRefreshAt.isAfter(Instant.EPOCH);
     }
@@ -431,31 +492,103 @@ public class GatewayRouteAccessService {
      * Cassandra; on Postgres failure (or absence) fall back to the Cassandra
      * read-cache; if both are unavailable keep the current snapshot (the
      * canonical seed at worst). Never fail-open.
+     *
+     * <p>A load that returns ZERO rows is treated like a failed one: it is never
+     * installed (hugmesh-gateway#61). An empty Postgres result therefore also falls
+     * through to the Cassandra cache, and an empty Cassandra result keeps the
+     * current snapshot. Package-private so tests can block on one tick.
      */
-    private Mono<Void> refreshNow() {
+    Mono<Void> refreshNow() {
+        Tick tick = new Tick();
         Mono<List<Rule>> fromPostgres = (routeAccessRepository == null)
                 ? Mono.empty()
-                : guarded(loadFromPostgres())
+                : guarded(loadFromPostgres(), "postgres", tick)
+                    .filter(loaded -> nonEmpty(loaded, "postgres", tick))
                     .doOnNext(loaded -> {
                         swap(loaded, "postgres");
+                        tick.installed = "postgres";
                         mirrorToCassandra(loaded).subscribe();
                     })
                     .onErrorResume(e -> {
+                        tick.fail("postgres", "load failed: " + e.getMessage());
                         log.warn("[route-access] Postgres load failed ({}), trying Cassandra cache",
                                 e.getMessage());
                         return Mono.empty();
                     });
 
-        Mono<List<Rule>> fromCassandra = guarded(loadFromCassandra())
-                .doOnNext(loaded -> swap(loaded, "cassandra"))
+        Mono<List<Rule>> fromCassandra = guarded(loadFromCassandra(), "cassandra", tick)
+                .filter(loaded -> nonEmpty(loaded, "cassandra", tick))
+                .doOnNext(loaded -> {
+                    swap(loaded, "cassandra");
+                    tick.installed = "cassandra";
+                })
                 .onErrorResume(e -> {
+                    tick.fail("cassandra", "load failed: " + e.getMessage());
                     log.warn("[route-access] Cassandra cache load failed ({}), keeping current snapshot",
                             e.getMessage());
                     return Mono.empty();
                 });
 
         // switchIfEmpty so Cassandra is only consulted when Postgres yields nothing.
-        return fromPostgres.switchIfEmpty(fromCassandra).then();
+        return fromPostgres.switchIfEmpty(fromCassandra)
+                .then(Mono.fromRunnable(() -> assess(tick)));
+    }
+
+    /** What one refresh tick did: which source (if any) it installed, and why the
+     *  others did not count. Confined to a single tick's reactive chain. */
+    private static final class Tick {
+        volatile String installed;          // "postgres" | "cassandra" | null
+        volatile String postgresProblem;
+        volatile String cassandraProblem;
+
+        void fail(String src, String why) {
+            if ("postgres".equals(src)) {
+                if (postgresProblem == null) postgresProblem = why;
+            } else if (cassandraProblem == null) {
+                cassandraProblem = why;
+            }
+        }
+    }
+
+    /** {@code true} iff {@code loaded} may replace the current snapshot. An empty
+     *  list never may (hugmesh-gateway#61): it is recorded as this tick's problem
+     *  for {@code src} and the caller's fallback chain takes over. */
+    private boolean nonEmpty(List<Rule> loaded, String src, Tick tick) {
+        if (!loaded.isEmpty()) return true;
+        tick.fail(src, "returned 0 rows for " + gatewayName);
+        return false;
+    }
+
+    /** Recompute {@link #degradedReason} after a tick. Logs at ERROR when the gateway
+     *  BECOMES degraded or starts enforcing a different snapshot source, and at INFO
+     *  on recovery, so a long outage does not emit one line per refresh interval. */
+    private void assess(Tick tick) {
+        String auth = authoritativeSource();
+        if ("seed".equals(auth) || auth.equals(tick.installed)) {
+            // Only a degraded state that was LOGGED gets a recovery line; the
+            // "not loaded yet" placeholder set by init() clears silently on a
+            // normal boot.
+            if (degradedEnforcing != null) {
+                log.info("[route-access] recovered for {}: enforcing {} rules from {} (degraded since {})",
+                        gatewayName, rules.size(), source, degradedSince);
+            }
+            degradedReason = null;
+            degradedSince = null;
+            degradedEnforcing = null;
+            return;
+        }
+        String problem = "postgres".equals(auth) ? tick.postgresProblem : tick.cassandraProblem;
+        String enforcing = source;
+        String reason = auth + " " + (problem != null ? problem : "unavailable")
+                + "; enforcing the " + ("seed".equals(enforcing)
+                        ? "seed floor" : "last-known-good " + enforcing + " snapshot")
+                + " (" + rules.size() + " rules)";
+        if (degradedSince == null) degradedSince = Instant.now();
+        if (!enforcing.equals(degradedEnforcing)) {
+            log.error("[route-access] DEGRADED for {}: {}", gatewayName, reason);
+        }
+        degradedEnforcing = enforcing;
+        degradedReason = reason;
     }
 
     /**
@@ -467,9 +600,10 @@ public class GatewayRouteAccessService {
      * gateway keeps enforcing its last-good snapshot (never fail-open). With no
      * breaker (minimal/test wiring) the read is returned unwrapped.
      */
-    private Mono<List<Rule>> guarded(Mono<List<Rule>> read) {
+    private Mono<List<Rule>> guarded(Mono<List<Rule>> read, String src, Tick tick) {
         if (refreshBreaker == null) return read;
         return refreshBreaker.run(read, t -> {
+            tick.fail(src, "read fast-failed by the routeAccess breaker: " + t);
             log.warn("[route-access] routeAccess breaker fast-failed a refresh read: {}", t.toString());
             return Mono.empty();
         });
@@ -526,17 +660,23 @@ public class GatewayRouteAccessService {
     /** Write-through the authoritative Postgres rows into the Cassandra cache. */
     private Mono<Void> mirrorToCassandra(List<Rule> loaded) {
         if (cql == null) return Mono.empty();
-        Mono<Void> chain = Mono.empty();
-        for (Rule r : loaded) {
-            chain = chain.then(Mono.from(cql.execute(
-                    "INSERT INTO gateway_route_access " +
-                    "(id, gateway, url_pattern, role, casdoor_user, \"allow\", domain, mfa_required, updated_at) " +
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, toTimestamp(now()))",
-                    r.id(), r.gateway(), r.urlPattern(), r.role(), r.casdoorUser(), r.allow(),
-                    r.domain(), r.mfaRequired()))
-                .then());
-        }
-        return chain.onErrorResume(e -> {
+        // Deferred: building the chain calls cql.execute(...) per row, and a
+        // synchronous throw there must surface as THIS Mono's error (caught below),
+        // never inside the Postgres load's doOnNext, where it would be misreported
+        // as a failed Postgres load.
+        return Mono.defer(() -> {
+            Mono<Void> chain = Mono.empty();
+            for (Rule r : loaded) {
+                chain = chain.then(Mono.from(cql.execute(
+                        "INSERT INTO gateway_route_access " +
+                        "(id, gateway, url_pattern, role, casdoor_user, \"allow\", domain, mfa_required, updated_at) " +
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, toTimestamp(now()))",
+                        r.id(), r.gateway(), r.urlPattern(), r.role(), r.casdoorUser(), r.allow(),
+                        r.domain(), r.mfaRequired()))
+                    .then());
+            }
+            return chain;
+        }).onErrorResume(e -> {
             log.warn("[route-access] Cassandra mirror failed (cache may lag Postgres): {}", e.getMessage());
             return Mono.empty();
         });
