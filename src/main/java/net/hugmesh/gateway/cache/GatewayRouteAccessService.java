@@ -11,14 +11,26 @@ import org.springframework.lang.Nullable;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.util.AntPathMatcher;
+import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import net.hugmesh.gateway.security.DomainRegistry;
 
 import jakarta.annotation.PostConstruct;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Comparator;
+import java.util.HashSet;
+import java.util.HexFormat;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Per-gateway external-access enforcement — the missing layer that turns the
@@ -35,11 +47,17 @@ import java.util.List;
  *       {@code cluster/manifests/route-access/schema.sql}). The gateway SELECTs
  *       ONLY its own gateway's rows, reactively, on startup and on every refresh
  *       tick.</li>
- *   <li><b>Cassandra</b> ({@code hugmesh_gateway.gateway_route_access}) is the
- *       cluster READ-CACHE. After each successful Postgres load the gateway
- *       write-through-mirrors the rows into Cassandra; if Postgres is briefly
- *       unreachable the gateway falls back to the Cassandra snapshot so the last
- *       known rules keep being enforced (no fail-open).</li>
+ *   <li><b>Cassandra</b> is the cluster READ-CACHE. After a successful Postgres
+ *       load whose content differs from the cached copy, the gateway writes the
+ *       rows into a NEW generation ({@code gateway_route_access_gen}) and only then
+ *       points the per-gateway marker row ({@code gateway_route_access_current})
+ *       at it. A reader uses only the marked generation and only when it holds
+ *       exactly the marker's {@code row_count} rows with the marker's content
+ *       hash, so a mirror interrupted part-way is never read: the previous complete
+ *       generation stays in force (see {@link #mirrorToCassandra}). If Postgres is
+ *       unreachable the gateway falls back to that generation, unioned with the
+ *       {@link CanonicalSeed} floor (see below). The pre-generation
+ *       {@code gateway_route_access} table is neither read nor written any more.</li>
  *   <li>If neither is configured (pure unit test / minimal dev) the in-memory
  *       canonical seed (the contract's seed for this gateway) is used so the
  *       enforcement is never silently absent.</li>
@@ -56,6 +74,18 @@ import java.util.List;
  * installing it made every path {@code NO_RULE}, so the gate failed OPEN. A NON-empty load is installed in
  * full, so an admin deleting some rows still takes effect on the next tick;
  * deleting EVERY row of a gateway is refused and reported.
+ *
+ * <p><b>A Cassandra FALLBACK never weakens the seed floor (round 2 of #61).</b>
+ * When Postgres is wired but failed or returned nothing, the Cassandra rows are
+ * installed together with every {@link CanonicalSeed} rule whose
+ * {@code url_pattern} no cache row carries, so a cache that lacks a pattern (an
+ * older or partial mirror, an admin's edit) still leaves the seed deciding that
+ * pattern, default-deny included. Such an install never moves
+ * {@link #lastRefreshAt}, so {@link #isPrimed} stays {@code false} and the
+ * privileged MFA floor keeps refusing until a Postgres load succeeds; the gateway
+ * stays degraded (health {@code DOWN}) with the reason. Only a gateway with NO
+ * Postgres wired treats a complete Cassandra generation as its authority (it is
+ * then unioned with the seed the same way, and does prime).
  *
  * <p><b>Degraded state.</b> While a datastore is wired but the authoritative one
  * (Postgres when wired, else the Cassandra cache) did not supply this tick's
@@ -139,6 +169,14 @@ public class GatewayRouteAccessService {
 
     /** Snapshot of the rules scoped to THIS gateway. Atomically swapped. */
     private volatile List<Rule> rules = List.of();
+    /** How many of {@link #rules} are seed-floor rules added under a Cassandra
+     *  install (patterns the cache did not cover); {@code 0} otherwise. */
+    private volatile int seedFloorRules = 0;
+    /** The generation THIS pod last marked current in the Cassandra cache — the
+     *  only generation it ever deletes (after marking a newer one). */
+    private volatile String lastMirroredGeneration = null;
+    /** One mirror at a time per pod; a tick that finds one in flight skips. */
+    private final AtomicBoolean mirrorInFlight = new AtomicBoolean(false);
     private volatile Instant lastRefreshAt = Instant.EPOCH;
     private volatile String source = "seed";
     /** Why the gateway is NOT enforcing a fresh load from its authoritative source,
@@ -376,6 +414,12 @@ public class GatewayRouteAccessService {
         return rules.size();
     }
 
+    /** Seed-floor rules unioned into a Cassandra install (patterns the cache did
+     *  not cover); {@code 0} for a Postgres or seed snapshot. */
+    public int seedFloorRules() {
+        return seedFloorRules;
+    }
+
     /** {@code false} when {@code app.route-access.enabled=false} (the gate is off). */
     public boolean isEnabled() {
         return enabled;
@@ -496,7 +540,9 @@ public class GatewayRouteAccessService {
      * <p>A load that returns ZERO rows is treated like a failed one: it is never
      * installed (hugmesh-gateway#61). An empty Postgres result therefore also falls
      * through to the Cassandra cache, and an empty Cassandra result keeps the
-     * current snapshot. Package-private so tests can block on one tick.
+     * current snapshot. A Cassandra result is installed only as the union with the
+     * seed floor and never primes while Postgres is wired
+     * ({@link #installCassandra}). Package-private so tests can block on one tick.
      */
     Mono<Void> refreshNow() {
         Tick tick = new Tick();
@@ -519,7 +565,7 @@ public class GatewayRouteAccessService {
         Mono<List<Rule>> fromCassandra = guarded(loadFromCassandra(), "cassandra", tick)
                 .filter(loaded -> nonEmpty(loaded, "cassandra", tick))
                 .doOnNext(loaded -> {
-                    swap(loaded, "cassandra");
+                    installCassandra(loaded);
                     tick.installed = "cassandra";
                 })
                 .onErrorResume(e -> {
@@ -582,7 +628,9 @@ public class GatewayRouteAccessService {
         String reason = auth + " " + (problem != null ? problem : "unavailable")
                 + "; enforcing the " + ("seed".equals(enforcing)
                         ? "seed floor" : "last-known-good " + enforcing + " snapshot")
-                + " (" + rules.size() + " rules)";
+                + " (" + rules.size() + " rules"
+                + (seedFloorRules > 0 ? ", " + seedFloorRules + " of them seed-floor rules for patterns the cache lacks" : "")
+                + ")";
         if (degradedSince == null) degradedSince = Instant.now();
         if (!enforcing.equals(degradedEnforcing)) {
             log.error("[route-access] DEGRADED for {}: {}", gatewayName, reason);
@@ -609,11 +657,50 @@ public class GatewayRouteAccessService {
         });
     }
 
+    /** Install an AUTHORITATIVE load (Postgres) wholesale and mark the snapshot
+     *  primed. A Cassandra result goes through {@link #installCassandra} instead. */
     private void swap(List<Rule> next, String src) {
         this.rules = List.copyOf(next);
+        this.seedFloorRules = 0;
         this.lastRefreshAt = Instant.now();
         this.source = src;
         log.debug("[route-access] refreshed {} rules for {} from {}", next.size(), gatewayName, src);
+    }
+
+    /**
+     * Install a Cassandra cache result as the UNION of the cache rows and every
+     * {@link CanonicalSeed} rule whose {@code url_pattern} no cache row carries, so
+     * the seed keeps deciding (default-deny included) every pattern the cache does
+     * not know about. A pattern the cache DOES carry is decided by the cache rows
+     * alone, so an admin's edit to a seeded pattern that reached the cache stands.
+     *
+     * <p>{@link #lastRefreshAt} moves ONLY when no Postgres is wired (Cassandra is
+     * then this gateway's authority). As a fallback for a failed or empty Postgres
+     * load it never moves, so {@link #isPrimed} stays {@code false} and the
+     * privileged MFA floor keeps refusing until Postgres answers.
+     */
+    private void installCassandra(List<Rule> cacheRows) {
+        List<Rule> merged = withSeedFloor(cacheRows, CanonicalSeed.forGateway(gatewayName));
+        this.rules = List.copyOf(merged);
+        this.seedFloorRules = merged.size() - cacheRows.size();
+        if (routeAccessRepository == null) {
+            this.lastRefreshAt = Instant.now();
+        }
+        this.source = "cassandra";
+        log.debug("[route-access] installed {} cache rules + {} seed-floor rules for {}",
+                cacheRows.size(), seedFloorRules, gatewayName);
+    }
+
+    /** {@code cache} plus each {@code seed} rule whose pattern no {@code cache} rule
+     *  carries. Package-private for the union-semantics tests. */
+    static List<Rule> withSeedFloor(List<Rule> cache, List<Rule> seed) {
+        Set<String> covered = new HashSet<>();
+        for (Rule r : cache) covered.add(r.urlPattern());
+        List<Rule> merged = new ArrayList<>(cache);
+        for (Rule r : seed) {
+            if (!covered.contains(r.urlPattern())) merged.add(r);
+        }
+        return merged;
     }
 
     private Mono<List<Rule>> loadFromPostgres() {
@@ -634,52 +721,187 @@ public class GatewayRouteAccessService {
             .collectList();
     }
 
-    private Mono<List<Rule>> loadFromCassandra() {
-        if (cql == null) return Mono.empty();
-        var next = new ArrayList<Rule>();
-        return cql.queryForRows(
-                "SELECT id, gateway, url_pattern, role, casdoor_user, \"allow\", domain, mfa_required " +
-                "FROM gateway_route_access")
-            .doOnNext(row -> {
-                String gateway = row.getString("gateway");
-                // Each pod caches only the rules for its own instance — a be
-                // gateway never enforces fe rules even though they share a table.
-                if (gateway == null || !gateway.equals(gatewayName)) return;
-                next.add(new Rule(
-                        row.getString("id"), gateway,
-                        row.getString("url_pattern"),
-                        row.getString("role"),
-                        row.getString("casdoor_user"),
-                        Boolean.TRUE.equals(row.getBoolean("allow")),
-                        row.getString("domain"),
-                        Boolean.TRUE.equals(row.getBoolean("mfa_required"))));
-            })
-            .then(Mono.fromCallable(() -> (List<Rule>) next));
+    // ── Cassandra read-cache: generations + a "current generation" marker ────────
+
+    static final String SELECT_MARKER =
+            "SELECT generation, row_count, content_hash FROM gateway_route_access_current WHERE gateway = ?";
+    static final String SELECT_GENERATION =
+            "SELECT id, gateway, url_pattern, role, casdoor_user, \"allow\", domain, mfa_required " +
+            "FROM gateway_route_access_gen WHERE gateway = ? AND generation = ?";
+    static final String INSERT_GENERATION_ROW =
+            "INSERT INTO gateway_route_access_gen " +
+            "(gateway, generation, id, url_pattern, role, casdoor_user, \"allow\", domain, mfa_required) " +
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)";
+    static final String UPSERT_MARKER =
+            "INSERT INTO gateway_route_access_current (gateway, generation, row_count, content_hash, written_at) " +
+            "VALUES (?, ?, ?, ?, ?)";
+    static final String DELETE_GENERATION =
+            "DELETE FROM gateway_route_access_gen WHERE gateway = ? AND generation = ?";
+
+    /** The marker row: which generation is current, and what it must contain. */
+    private record Marker(String generation, int rowCount, String contentHash) {}
+
+    private Mono<Marker> readMarker() {
+        return Flux.from(cql.queryForRows(SELECT_MARKER, gatewayName))
+                .next()
+                .filter(row -> row.getString("generation") != null)
+                .map(row -> new Marker(row.getString("generation"),
+                        row.getInt("row_count"), row.getString("content_hash")));
     }
 
-    /** Write-through the authoritative Postgres rows into the Cassandra cache. */
+    /**
+     * Read the generation the marker names, and only if it is COMPLETE: exactly
+     * the marker's {@code row_count} rows, with the marker's content hash. A
+     * missing marker reads as zero rows (the caller keeps its current snapshot);
+     * a generation that does not match its marker (a mirror still being written
+     * by a pod whose marker write raced ahead on another replica, or one being
+     * deleted under the read) is an error, so the caller keeps its current
+     * snapshot rather than installing part of a table.
+     */
+    private Mono<List<Rule>> loadFromCassandra() {
+        if (cql == null) return Mono.empty();
+        return Mono.defer(() -> readMarker()
+                .flatMap(marker -> Flux.from(cql.queryForRows(SELECT_GENERATION, gatewayName, marker.generation()))
+                        .map(row -> new Rule(
+                                row.getString("id"),
+                                row.getString("gateway"),
+                                row.getString("url_pattern"),
+                                row.getString("role"),
+                                row.getString("casdoor_user"),
+                                Boolean.TRUE.equals(row.getBoolean("allow")),
+                                row.getString("domain"),
+                                Boolean.TRUE.equals(row.getBoolean("mfa_required"))))
+                        // The partition is this gateway's; a foreign row is never enforced.
+                        .filter(r -> gatewayName.equals(r.gateway()))
+                        .collectList()
+                        .flatMap(loaded -> {
+                            if (loaded.size() != marker.rowCount()
+                                    || !contentHash(loaded).equals(marker.contentHash())) {
+                                return Mono.error(new IllegalStateException(
+                                        "cache generation " + marker.generation() + " is incomplete ("
+                                        + loaded.size() + " of " + marker.rowCount() + " rows, or a content-hash mismatch)"));
+                            }
+                            return Mono.just(loaded);
+                        }))
+                .defaultIfEmpty(List.of()));
+    }
+
+    /**
+     * Write-through the authoritative Postgres rows into the Cassandra cache,
+     * complete-or-ignored:
+     * <ol>
+     *   <li>read the marker; if it already names a generation with this exact
+     *       content, do nothing (no churn on the 5 s tick);</li>
+     *   <li>write every row under a NEW generation id;</li>
+     *   <li>only then point the marker at it (the single flip);</li>
+     *   <li>then delete the generation THIS pod marked last time, if any. A pod
+     *       never deletes another pod's generation, so it can never delete the one
+     *       another replica just marked current.</li>
+     * </ol>
+     * An interruption before step 3 leaves the previous complete generation marked
+     * and an unreferenced partition behind (deleted best-effort right away;
+     * otherwise never read). Readers also check row count and content hash, so a
+     * marker that raced ahead of its rows on another replica is not read either.
+     *
+     * <p>DEFERRED: no CQL statement is issued while this method assembles the
+     * chain, so a synchronous throw from the driver surfaces as THIS Mono's error
+     * (logged below), never inside the Postgres load's {@code doOnNext}, where it
+     * would be taken for a failed Postgres load and send the tick to the cache.
+     */
     private Mono<Void> mirrorToCassandra(List<Rule> loaded) {
         if (cql == null) return Mono.empty();
-        // Deferred: building the chain calls cql.execute(...) per row, and a
-        // synchronous throw there must surface as THIS Mono's error (caught below),
-        // never inside the Postgres load's doOnNext, where it would be misreported
-        // as a failed Postgres load.
-        return Mono.defer(() -> {
-            Mono<Void> chain = Mono.empty();
-            for (Rule r : loaded) {
-                chain = chain.then(Mono.from(cql.execute(
-                        "INSERT INTO gateway_route_access " +
-                        "(id, gateway, url_pattern, role, casdoor_user, \"allow\", domain, mfa_required, updated_at) " +
-                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, toTimestamp(now()))",
-                        r.id(), r.gateway(), r.urlPattern(), r.role(), r.casdoorUser(), r.allow(),
-                        r.domain(), r.mfaRequired()))
-                    .then());
-            }
-            return chain;
-        }).onErrorResume(e -> {
-            log.warn("[route-access] Cassandra mirror failed (cache may lag Postgres): {}", e.getMessage());
-            return Mono.empty();
-        });
+        return Mono.defer(() -> mirrorExclusive(loaded))
+                .onErrorResume(e -> {
+                    log.warn("[route-access] Cassandra mirror failed (cache may lag Postgres): {}", e.getMessage());
+                    return Mono.empty();
+                });
+    }
+
+    private Mono<Void> mirrorExclusive(List<Rule> loaded) {
+        if (!mirrorInFlight.compareAndSet(false, true)) return Mono.empty();
+        try {
+            return mirrorOnce(loaded).doFinally(sig -> mirrorInFlight.set(false));
+        } catch (RuntimeException e) {
+            mirrorInFlight.set(false);
+            throw e;
+        }
+    }
+
+    private Mono<Void> mirrorOnce(List<Rule> loaded) {
+        List<Rule> rows = cacheShaped(loaded);
+        String hash = contentHash(rows);
+        return readMarker()
+                .map(m -> hash.equals(m.contentHash()))
+                .defaultIfEmpty(false)
+                .flatMap(unchanged -> unchanged ? Mono.<Void>empty() : writeGeneration(rows, hash));
+    }
+
+    private Mono<Void> writeGeneration(List<Rule> rows, String hash) {
+        String generation = UUID.randomUUID().toString();
+        String previous = lastMirroredGeneration;
+        Mono<Void> chain = Mono.empty();
+        for (Rule r : rows) {
+            chain = chain.then(Mono.defer(() -> Mono.from(cql.execute(INSERT_GENERATION_ROW,
+                    gatewayName, generation, r.id(), r.urlPattern(), r.role(), r.casdoorUser(),
+                    r.allow(), r.domain(), r.mfaRequired()))).then());
+        }
+        return chain
+                .onErrorResume(e -> deleteGeneration(generation).then(Mono.error(e)))
+                // The flip: written LAST, so readers never see this generation before it is whole.
+                .then(Mono.defer(() -> Mono.from(cql.execute(UPSERT_MARKER,
+                        gatewayName, generation, rows.size(), hash, Instant.now()))).then())
+                .then(Mono.fromRunnable(() -> lastMirroredGeneration = generation))
+                .then(previous == null || previous.equals(generation)
+                        ? Mono.<Void>empty()
+                        : deleteGeneration(previous));
+    }
+
+    /** Best-effort delete of one generation partition; a failure only leaves an
+     *  unreferenced partition behind. */
+    private Mono<Void> deleteGeneration(String generation) {
+        return Mono.defer(() -> Mono.from(cql.execute(DELETE_GENERATION, gatewayName, generation)))
+                .then()
+                .onErrorResume(e -> {
+                    log.warn("[route-access] could not delete cache generation {}: {}", generation, e.getMessage());
+                    return Mono.empty();
+                });
+    }
+
+    /** The rows exactly as the cache stores them: this gateway's name, a non-null
+     *  unique clustering id ({@code row-<n>} when Postgres gave none), first id wins. */
+    private List<Rule> cacheShaped(List<Rule> loaded) {
+        Map<String, Rule> byId = new LinkedHashMap<>();
+        int n = 0;
+        for (Rule r : loaded) {
+            String id = r.id() != null ? r.id() : "row-" + n;
+            n++;
+            byId.putIfAbsent(id, new Rule(id, gatewayName, r.urlPattern(), r.role(), r.casdoorUser(),
+                    r.allow(), r.domain(), r.mfaRequired()));
+        }
+        return new ArrayList<>(byId.values());
+    }
+
+    /** Order-independent SHA-256 over every field of every rule. */
+    static String contentHash(List<Rule> rules) {
+        List<Rule> sorted = new ArrayList<>(rules);
+        sorted.sort(Comparator.comparing(r -> String.valueOf(r.id())));
+        StringBuilder sb = new StringBuilder();
+        for (Rule r : sorted) {
+            sb.append(field(r.id())).append('\u001f').append(field(r.gateway())).append('\u001f')
+              .append(field(r.urlPattern())).append('\u001f').append(field(r.role())).append('\u001f')
+              .append(field(r.casdoorUser())).append('\u001f').append(r.allow()).append('\u001f')
+              .append(field(r.domain())).append('\u001f').append(r.mfaRequired()).append('\u001e');
+        }
+        try {
+            return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
+                    .digest(sb.toString().getBytes(StandardCharsets.UTF_8)));
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    private static String field(String v) {
+        return v == null ? "\u0000" : v;
     }
 
     /** Test seam — prime the in-memory snapshot without a live datastore.

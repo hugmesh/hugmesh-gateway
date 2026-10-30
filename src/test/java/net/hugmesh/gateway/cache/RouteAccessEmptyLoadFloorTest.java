@@ -1,6 +1,5 @@
 package net.hugmesh.gateway.cache;
 
-import com.datastax.oss.driver.api.core.cql.Row;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
@@ -11,13 +10,11 @@ import org.springframework.cloud.client.circuitbreaker.ConfigBuilder;
 import org.springframework.cloud.client.circuitbreaker.ReactiveCircuitBreaker;
 import org.springframework.cloud.client.circuitbreaker.ReactiveCircuitBreakerFactory;
 import org.springframework.data.cassandra.core.ReactiveCassandraTemplate;
-import org.springframework.data.cassandra.core.cql.ReactiveCqlOperations;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
 import java.util.List;
 import java.util.UUID;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
 import java.util.stream.Stream;
@@ -27,8 +24,6 @@ import net.hugmesh.gateway.cache.GatewayRouteAccessService.Rule;
 import net.hugmesh.gateway.config.RouteAccessR2dbcConfig;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -76,32 +71,8 @@ class RouteAccessEmptyLoadFloorTest {
                 pgRow("/pg-only/**", "ROLE_ADMIN"));
     }
 
-    /** A mocked Cassandra template whose {@code SELECT} streams {@code rows}, and
-     *  whose mirror INSERTs succeed and are counted in {@code mirrored}. */
-    private static ReactiveCassandraTemplate cassandra(AtomicReference<Flux<Row>> rows,
-                                                       AtomicInteger mirrored) {
-        ReactiveCqlOperations cql = mock(ReactiveCqlOperations.class);
-        when(cql.queryForRows(anyString())).thenAnswer(inv -> rows.get());
-        when(cql.execute(anyString(), any(Object[].class))).thenAnswer(inv -> {
-            mirrored.incrementAndGet();
-            return Mono.just(true);
-        });
-        ReactiveCassandraTemplate template = mock(ReactiveCassandraTemplate.class);
-        when(template.getReactiveCqlOperations()).thenReturn(cql);
-        return template;
-    }
-
-    private static Row cRow(String gateway, String pattern, String role) {
-        Row row = mock(Row.class);
-        when(row.getString("id")).thenReturn("c-" + pattern + "-" + role);
-        when(row.getString("gateway")).thenReturn(gateway);
-        when(row.getString("url_pattern")).thenReturn(pattern);
-        when(row.getString("role")).thenReturn(role);
-        when(row.getString("casdoor_user")).thenReturn(null);
-        when(row.getBoolean("allow")).thenReturn(true);
-        when(row.getString("domain")).thenReturn(null);
-        when(row.getBoolean("mfa_required")).thenReturn(false);
-        return row;
+    private static Rule cRule(String gateway, String pattern, String role) {
+        return new Rule("c-" + pattern + "-" + role, gateway, pattern, role, null, true, null, false);
     }
 
     private static RuntimeException authRejected() {
@@ -137,9 +108,8 @@ class RouteAccessEmptyLoadFloorTest {
     @MethodSource("breakers")
     void postgresOk_installsTheTable_mirrorsIt_andIsHealthy(String label, ReactiveCircuitBreakerFactory<?, ?> b) {
         var pg = new AtomicReference<>(Flux.fromIterable(pgTable()));
-        var cs = new AtomicReference<Flux<Row>>(Flux.empty());
-        var mirrored = new AtomicInteger();
-        GatewayRouteAccessService svc = service(postgres(pg), cassandra(cs, mirrored), b);
+        var cs = new FakeRouteAccessCassandra();
+        GatewayRouteAccessService svc = service(postgres(pg), cs.template(), b);
 
         coldStart(svc);
 
@@ -148,8 +118,10 @@ class RouteAccessEmptyLoadFloorTest {
         assertThat(svc.decide("/pg-only/x", "default", IDS, USER)).isEqualTo(Decision.DENY);
         assertThat(svc.isPrimed()).isTrue();
         assertThat(svc.degradedReason()).isNull();
-        assertThat(mirrored.get()).as("every Postgres row write-through-mirrored, on both ticks")
-                .isEqualTo(2 * 3);
+        assertThat(cs.rowInserts.get())
+                .as("every Postgres row mirrored once; the second tick finds the same content and writes nothing")
+                .isEqualTo(3);
+        assertThat(cs.rowsIn(GATEWAY, cs.currentGeneration(GATEWAY))).isEqualTo(3);
         assertThat(health(svc).getStatus()).isEqualTo(Status.UP);
     }
 
@@ -159,8 +131,8 @@ class RouteAccessEmptyLoadFloorTest {
     @MethodSource("breakers")
     void postgresFails_cassandraEmpty_coldStart_keepsSeedFloor(String label, ReactiveCircuitBreakerFactory<?, ?> b) {
         var pg = new AtomicReference<Flux<GatewayRouteAccessRow>>(Flux.error(authRejected()));
-        var cs = new AtomicReference<Flux<Row>>(Flux.empty());
-        GatewayRouteAccessService svc = service(postgres(pg), cassandra(cs, new AtomicInteger()), b);
+        var cs = new FakeRouteAccessCassandra();
+        GatewayRouteAccessService svc = service(postgres(pg), cs.template(), b);
 
         coldStart(svc);
         svc.refreshNow().block();   // and it stays that way tick after tick
@@ -192,11 +164,12 @@ class RouteAccessEmptyLoadFloorTest {
     @MethodSource("breakers")
     void postgresFails_cassandraEmpty_afterGoodLoad_keepsLastKnownGood(String label, ReactiveCircuitBreakerFactory<?, ?> b) {
         var pg = new AtomicReference<>(Flux.fromIterable(pgTable()));
-        var cs = new AtomicReference<Flux<Row>>(Flux.empty());
-        GatewayRouteAccessService svc = service(postgres(pg), cassandra(cs, new AtomicInteger()), b);
+        var cs = new FakeRouteAccessCassandra();
+        GatewayRouteAccessService svc = service(postgres(pg), cs.template(), b);
         coldStart(svc);
         assertThat(svc.source()).isEqualTo("postgres");
         var primedAt = svc.lastRefreshAt();
+        cs.clear();   // the cache is lost (rebuilt Cassandra), so the fallback finds nothing
 
         pg.set(Flux.error(authRejected()));
         svc.refreshNow().block();
@@ -222,22 +195,29 @@ class RouteAccessEmptyLoadFloorTest {
     @MethodSource("breakers")
     void postgresFails_cassandraPopulated_installsCassandra(String label, ReactiveCircuitBreakerFactory<?, ?> b) {
         var pg = new AtomicReference<Flux<GatewayRouteAccessRow>>(Flux.error(authRejected()));
-        var cs = new AtomicReference<Flux<Row>>(Flux.just(
-                cRow(GATEWAY, "/api/admin/**", "ROLE_ADMIN"),
-                cRow(GATEWAY, "/cass-only/**", "ROLE_ADMIN"),
-                // another gateway's row in the shared table is never enforced here
-                cRow("hugmesh-fe-gateway", "/fe-only/**", "ROLE_ADMIN")));
-        GatewayRouteAccessService svc = service(postgres(pg), cassandra(cs, new AtomicInteger()), b);
+        var cs = new FakeRouteAccessCassandra();
+        cs.putCompleteGeneration(GATEWAY, "g1", List.of(
+                cRule(GATEWAY, "/api/admin/**", "ROLE_ADMIN"),
+                cRule(GATEWAY, "/cass-only/**", "ROLE_ADMIN")));
+        // another gateway's generation in the shared tables is never read here
+        cs.putCompleteGeneration("hugmesh-fe-gateway", "g9", List.of(
+                cRule("hugmesh-fe-gateway", "/fe-only/**", "ROLE_ADMIN")));
+        GatewayRouteAccessService svc = service(postgres(pg), cs.template(), b);
 
         coldStart(svc);
 
+        int seedFloor = (int) CanonicalSeed.forGateway(GATEWAY).stream()
+                .filter(r -> !r.urlPattern().equals("/api/admin/**")).count();
         assertThat(svc.source()).isEqualTo("cassandra");
-        assertThat(svc.ruleCount()).isEqualTo(2);
+        assertThat(svc.ruleCount()).isEqualTo(2 + seedFloor);
+        assertThat(svc.seedFloorRules()).isEqualTo(seedFloor);
         assertThat(svc.decide("/cass-only/x", "default", IDS, USER)).isEqualTo(Decision.DENY);
         assertThat(svc.decide("/fe-only/x", "default", IDS, USER)).isEqualTo(Decision.NO_RULE);
         assertThat(svc.degradedReason())
                 .as("serving the cache while the source of truth fails is still degraded")
-                .contains("last-known-good cassandra snapshot (2 rules)");
+                .contains("last-known-good cassandra snapshot (" + (2 + seedFloor) + " rules, "
+                        + seedFloor + " of them seed-floor rules");
+        assertThat(svc.isPrimed()).as("a Cassandra fallback never primes").isFalse();
         assertThat(health(svc).getStatus()).isEqualTo(Status.DOWN);
     }
 
@@ -247,8 +227,8 @@ class RouteAccessEmptyLoadFloorTest {
     @MethodSource("breakers")
     void postgresReturnsZeroRows_isNotInstalled_coldStartAndAfterGoodLoad(String label, ReactiveCircuitBreakerFactory<?, ?> b) {
         var pg = new AtomicReference<Flux<GatewayRouteAccessRow>>(Flux.empty());
-        var cs = new AtomicReference<Flux<Row>>(Flux.empty());
-        GatewayRouteAccessService svc = service(postgres(pg), cassandra(cs, new AtomicInteger()), b);
+        var cs = new FakeRouteAccessCassandra();
+        GatewayRouteAccessService svc = service(postgres(pg), cs.template(), b);
 
         coldStart(svc);
         assertThat(svc.source()).isEqualTo("seed");
@@ -257,6 +237,7 @@ class RouteAccessEmptyLoadFloorTest {
 
         pg.set(Flux.fromIterable(pgTable()));
         svc.refreshNow().block();
+        cs.clear();             // and no cache to fall back to
         pg.set(Flux.empty());   // e.g. every row of this gateway deleted, or a renamed gateway
         svc.refreshNow().block();
         assertThat(svc.source()).isEqualTo("postgres");
@@ -269,8 +250,8 @@ class RouteAccessEmptyLoadFloorTest {
     @Test
     void adminDeletingSomeRows_takesEffectOnTheNextTick() {
         var pg = new AtomicReference<>(Flux.fromIterable(pgTable()));
-        var cs = new AtomicReference<Flux<Row>>(Flux.empty());
-        GatewayRouteAccessService svc = service(postgres(pg), cassandra(cs, new AtomicInteger()), null);
+        var cs = new FakeRouteAccessCassandra();
+        GatewayRouteAccessService svc = service(postgres(pg), cs.template(), null);
         coldStart(svc);
         assertThat(svc.decide("/pg-only/x", "default", IDS, USER)).isEqualTo(Decision.DENY);
 
@@ -291,8 +272,7 @@ class RouteAccessEmptyLoadFloorTest {
     void invalidR2dbcUrl_keepsSeedFloor_andReportsDegraded(String label, ReactiveCircuitBreakerFactory<?, ?> b) {
         GatewayRouteAccessRepository invalid = RouteAccessR2dbcConfig.failingRepository(
                 "ROUTE_ACCESS_R2DBC_URL is set but invalid (IllegalArgumentException)");
-        var cs = new AtomicReference<Flux<Row>>(Flux.empty());
-        GatewayRouteAccessService svc = service(invalid, cassandra(cs, new AtomicInteger()), b);
+        GatewayRouteAccessService svc = service(invalid, new FakeRouteAccessCassandra().template(), b);
 
         coldStart(svc);
 

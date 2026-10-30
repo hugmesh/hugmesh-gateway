@@ -1,6 +1,5 @@
 package net.hugmesh.gateway.cache;
 
-import com.datastax.oss.driver.api.core.cql.Row;
 import io.github.resilience4j.circuitbreaker.CallNotPermittedException;
 import io.github.resilience4j.circuitbreaker.CircuitBreaker;
 import io.github.resilience4j.circuitbreaker.CircuitBreakerConfig;
@@ -10,7 +9,6 @@ import org.springframework.cloud.client.circuitbreaker.ConfigBuilder;
 import org.springframework.cloud.client.circuitbreaker.ReactiveCircuitBreaker;
 import org.springframework.cloud.client.circuitbreaker.ReactiveCircuitBreakerFactory;
 import org.springframework.data.cassandra.core.ReactiveCassandraTemplate;
-import org.springframework.data.cassandra.core.cql.ReactiveCqlOperations;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.mock.http.server.reactive.MockServerHttpRequest;
@@ -39,8 +37,6 @@ import net.hugmesh.gateway.security.DomainRegistry;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -263,15 +259,10 @@ class RouteAccessDownstreamFailureTest {
 
     // ── test fixtures ───────────────────────────────────────────────────────────
 
-    /** A Cassandra template whose route-access SELECT returns ZERO rows (a fresh
-     *  cache), and whose mirror INSERTs succeed. */
+    /** A Cassandra cache with NO marked generation (a fresh cache), answering the
+     *  exact statements the service issues, and whose mirror writes succeed. */
     private static ReactiveCassandraTemplate emptyCassandra() {
-        ReactiveCqlOperations cql = mock(ReactiveCqlOperations.class);
-        when(cql.queryForRows(anyString())).thenReturn(Flux.<Row>empty());
-        when(cql.execute(anyString(), any(Object[].class))).thenReturn(Mono.just(true));
-        ReactiveCassandraTemplate template = mock(ReactiveCassandraTemplate.class);
-        when(template.getReactiveCqlOperations()).thenReturn(cql);
-        return template;
+        return new FakeRouteAccessCassandra().template();
     }
 
     /** A {@link ReactiveCircuitBreakerFactory} whose breaker is genuinely OPEN: it
