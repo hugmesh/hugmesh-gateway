@@ -1020,9 +1020,10 @@ class GatewayRouteAccessServiceTest {
         // cluster fe spec's vanity-subdomain route documents this allowance as
         // the deferred missing piece) and GET /api/federation/capabilities (the
         // public install-state projection a LOGGED-OUT host shell reads) must
-        // resolve ALLOW anonymously; every OTHER federation surface stays
-        // ungoverned here (NO_RULE — the coarse authenticated() floor is the
-        // authority), i.e. the rows did NOT widen into /api/federation/**.
+        // resolve ALLOW anonymously; the rows did NOT widen into a PUBLIC
+        // /api/federation/**. The manifest read is the cluster seed's ROLE_USER
+        // row (baked since the cluster-seed parity block, hugmesh-gateway#61
+        // round 2), so it is DENIED anonymously and ALLOWED for a signed-in user.
         var seed = CanonicalSeed.forGateway("hugmesh-fe-gateway");
         var s = new GatewayRouteAccessService(null, null, "hugmesh-fe-gateway", true, false, null);
         s.primeForTest(seed);
@@ -1034,6 +1035,11 @@ class GatewayRouteAccessServiceTest {
         }
         assertThat(s.decide("/api/federation/manifest", "default", List.of(), List.of()))
             .as("the public reads must NOT widen into a blanket /api/federation/** allow")
+            .isEqualTo(Decision.DENY);
+        assertThat(s.decide("/api/federation/manifest", "default", List.of("u1"), List.of("ROLE_USER")))
+            .isEqualTo(Decision.ALLOW);
+        assertThat(s.decide("/api/federation/modules", "default", List.of(), List.of()))
+            .as("other federation surfaces stay ungoverned on the fe floor")
             .isEqualTo(Decision.NO_RULE);
     }
 
@@ -1118,13 +1124,20 @@ class GatewayRouteAccessServiceTest {
     void canonicalSeed_feGateway_internalDenyRowsDoNotSwallowTheirTiers() {
         // Non-over-broadening: the rows are scoped to the `internal` path SEGMENT. The
         // ordinary user/mesh tier surfaces sitting under the SAME fe route predicates
-        // stay ungoverned by this baked floor (their tier floors live in the
-        // admin-managed Postgres rows), and the pre-existing /bff allow rows are intact.
+        // are decided by their own tier floors (baked since the cluster-seed parity
+        // block, hugmesh-gateway#61 round 2: /bff/user/** ROLE_USER, /bff/mesh/**
+        // ROLE_MESH), never by the deny rows; look-alike prefixes stay ungoverned,
+        // and the pre-existing /bff allow rows are intact.
         var seed = CanonicalSeed.forGateway("hugmesh-fe-gateway");
         var s = new GatewayRouteAccessService(null, null, "hugmesh-fe-gateway", true, false, null);
         s.primeForTest(seed);
-        for (String sibling : List.of("/bff/user/profile", "/bff/mesh/rooms",
-                "/bff/internal-ish/thing", "/bff/userinternal/x")) {
+        assertThat(s.decide("/bff/user/profile", "default", List.of("u1"), List.of("ROLE_USER")))
+            .as("/bff/user/profile must NOT be swallowed by the internal-ingest deny rows")
+            .isEqualTo(Decision.ALLOW);
+        assertThat(s.decide("/bff/mesh/rooms", "default", List.of("u1"), List.of("ROLE_USER", "ROLE_MESH")))
+            .as("/bff/mesh/rooms must NOT be swallowed by the internal-ingest deny rows")
+            .isEqualTo(Decision.ALLOW);
+        for (String sibling : List.of("/bff/internal-ish/thing", "/bff/userinternal/x")) {
             assertThat(s.decide(sibling, "default", List.of("u1"), List.of("ROLE_USER")))
                 .as("%s must NOT be swallowed by the internal-ingest deny rows", sibling)
                 .isEqualTo(Decision.NO_RULE);
