@@ -603,7 +603,7 @@ public class GatewayRouteAccessService {
     private Mono<List<Rule>> guarded(Mono<List<Rule>> read, String src, Tick tick) {
         if (refreshBreaker == null) return read;
         return refreshBreaker.run(read, t -> {
-            tick.fail(src, "read fast-failed by the routeAccess breaker: " + t);
+            tick.fail(src, "read failed (routeAccess breaker fallback): " + t);
             log.warn("[route-access] routeAccess breaker fast-failed a refresh read: {}", t.toString());
             return Mono.empty();
         });
