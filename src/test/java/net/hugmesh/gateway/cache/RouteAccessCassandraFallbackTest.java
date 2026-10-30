@@ -380,6 +380,94 @@ class RouteAccessCassandraFallbackTest {
                 .containsExactlyInAnyOrder("other-pod", mine2);
     }
 
+    // ── the content hash covers every field that decides access ─────────────────
+    //
+    // The id is held constant across each flip. rule() and pgRow() derive the id from
+    // the pattern and role, so a flip made through them also changes the id, and the
+    // hash differs through the id alone: dropping role from contentHash stayed green.
+
+    private static final UUID FLIP_ID = UUID.fromString("00000000-0000-0000-0000-000000000061");
+
+    private static Rule flipBase() {
+        return new Rule(FLIP_ID.toString(), GATEWAY, "/flip/**", "ROLE_USER", null, true, null, false);
+    }
+
+    /** Column name, the base row with only that column changed, the changed value. */
+    static Stream<Arguments> oneFieldFlips() {
+        Rule b = flipBase();
+        return Stream.of(
+                Arguments.of("role", new Rule(b.id(), GATEWAY, b.urlPattern(), "ROLE_ADMIN",
+                        b.casdoorUser(), b.allow(), b.domain(), b.mfaRequired()), "ROLE_ADMIN"),
+                Arguments.of("allow", new Rule(b.id(), GATEWAY, b.urlPattern(), b.role(),
+                        b.casdoorUser(), false, b.domain(), b.mfaRequired()), false),
+                Arguments.of("domain", new Rule(b.id(), GATEWAY, b.urlPattern(), b.role(),
+                        b.casdoorUser(), b.allow(), "tenant-a", b.mfaRequired()), "tenant-a"),
+                Arguments.of("mfa_required", new Rule(b.id(), GATEWAY, b.urlPattern(), b.role(),
+                        b.casdoorUser(), b.allow(), b.domain(), true), true),
+                Arguments.of("url_pattern", new Rule(b.id(), GATEWAY, "/flipped/**", b.role(),
+                        b.casdoorUser(), b.allow(), b.domain(), b.mfaRequired()), "/flipped/**"),
+                Arguments.of("casdoor_user", new Rule(b.id(), GATEWAY, b.urlPattern(), b.role(),
+                        "alice", b.allow(), b.domain(), b.mfaRequired()), "alice"));
+    }
+
+    private static GatewayRouteAccessRow pgRowOf(Rule r) {
+        return new GatewayRouteAccessRow(UUID.fromString(r.id()), r.gateway(), r.urlPattern(), r.role(),
+                r.casdoorUser(), r.allow(), r.domain(), r.mfaRequired(), null);
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("oneFieldFlips")
+    void reader_rejectsAGeneration_whoseMarkerHashPredatesAOneFieldFlip(String column, Rule flipped, Object value) {
+        var pg = new AtomicReference<Flux<GatewayRouteAccessRow>>(Flux.error(authRejected()));
+        var cs = new FakeRouteAccessCassandra();
+        cs.putRows(GATEWAY, "g-flipped", List.of(flipped));
+        cs.mark(GATEWAY, "g-flipped", 1, GatewayRouteAccessService.contentHash(List.of(flipBase())));
+        GatewayRouteAccessService svc = service(postgres(pg), cs, null);
+
+        coldStart(svc);
+
+        assertThat(svc.source())
+                .as("the row count matches, so only the hash can refuse a generation with %s flipped", column)
+                .isEqualTo("seed");
+        assertThat(svc.ruleCount()).isEqualTo(CanonicalSeed.forGateway(GATEWAY).size());
+        assertThat(svc.degradedReason()).contains("seed floor");
+
+        // Control: the same rows under their own hash are taken, so the refusal above
+        // came from the hash and not from anything else about this generation.
+        cs.mark(GATEWAY, "g-flipped", 1, GatewayRouteAccessService.contentHash(List.of(flipped)));
+        svc.refreshNow().block();
+        assertThat(svc.source()).isEqualTo("cassandra");
+        assertThat(svc.ruleCount()).isEqualTo(1 + CanonicalSeed.forGateway(GATEWAY).size());
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("oneFieldFlips")
+    void mirror_writesANewGeneration_forASnapshotThatDiffersOnlyInOneField(String column, Rule flipped, Object value) {
+        var pg = new AtomicReference<>(Flux.just(pgRowOf(flipBase())));
+        var cs = new FakeRouteAccessCassandra();
+        GatewayRouteAccessService svc = service(postgres(pg), cs, null);
+        coldStart(svc);
+        svc.refreshNow().block();
+        String before = cs.currentGeneration(GATEWAY);
+        assertThat(before).isNotNull();
+        assertThat(cs.markerWrites.get()).as("unchanged content is not remirrored").isEqualTo(1);
+
+        pg.set(Flux.just(pgRowOf(flipped)));
+        svc.refreshNow().block();
+
+        String after = cs.currentGeneration(GATEWAY);
+        assertThat(after).as("an edit to %s alone must reach the cache", column).isNotEqualTo(before);
+        assertThat(cs.markerWrites.get()).isEqualTo(2);
+        assertThat(cs.generations.get(GATEWAY + "|" + after).get(FLIP_ID.toString()))
+                .as("the new generation carries the edited value")
+                .containsEntry(column, value);
+
+        // The next outage enforces the edit, not the row it replaced.
+        pg.set(Flux.error(authRejected()));
+        svc.refreshNow().block();
+        assertThat(svc.source()).isEqualTo("cassandra");
+    }
+
     // ── the mirror is DEFERRED (round-1 mutation M9 survived every test) ────────
 
     @Test
