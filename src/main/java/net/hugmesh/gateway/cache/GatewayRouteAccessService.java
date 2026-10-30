@@ -67,8 +67,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * result with zero rows for this gateway, from EITHER source, never replaces the
  * current snapshot: the {@link CanonicalSeed} floor at cold start, or the last
  * non-empty load after that. The seed is never empty for any gateway name (the
- * baked pki/be/fe tiers carry 3/32/44 rows, the route-access database seed
- * 4/60/95, and an unknown name gets a closed {@code /** -> ROLE_ADMIN} floor),
+ * baked pki/be/fe tiers carry 3/69/92 rows, the cluster route-access seed
+ * 4/60/91, and an unknown name gets a closed {@code /** -> ROLE_ADMIN} floor),
  * so a gateway with zero rules is never an intended state. It is what a fresh
  * Cassandra cache returns while Postgres rejects the gateway's login, and
  * installing it made every path {@code NO_RULE}, so the gate failed OPEN. A NON-empty load is installed in
