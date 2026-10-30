@@ -11,10 +11,14 @@ import java.util.Set;
  * before (or without) a Postgres/Cassandra round-trip — the gate is never
  * silently fail-open.
  *
- * <p>The same rows live in the cluster's Postgres seed
- * ({@code cluster/manifests/route-access/schema.sql}); this in-memory copy is
- * the floor used when neither datastore is reachable. Once Postgres/Cassandra
- * answer, the loaded rows replace this snapshot wholesale.
+ * <p>The same rows live in the cluster's Postgres seed (generator
+ * {@code specs/cluster/manifests/route-access/initdb/20-schema.sql}): every
+ * pki/be/fe row of it is baked here too, except the few deliberate divergences
+ * {@code CanonicalSeedSqlSyncTest} names with their decisions, and that test fails
+ * on any other difference in either direction. This in-memory copy is the floor
+ * used when neither datastore is reachable. A Postgres load replaces it wholesale;
+ * a Cassandra fallback is unioned with it (every seed pattern the cache does not
+ * carry stays governed by the seed).
  *
  * <p>Roles are Spring authorities ({@code ROLE_USER}, {@code ROLE_ADMIN}) or the
  * sentinel {@code PUBLIC} (anonymous-allowed). {@code **} is Ant-style.
@@ -92,15 +96,21 @@ final class CanonicalSeed {
      *       names no row {@link #r} is never called with.
      * </ol>
      *
-     * <p><b>WIDENED by decision 80b = B</b> (hugmesh-generator#329, operator answer
+     * <p><b>Grown with the cluster-seed parity rows</b> (hugmesh-gateway#61 round 2):
+ * once {@link #be()} / {@link #fe()} bake every pki/be/fe row of the cluster seed,
+ * point 2 above admits the per-service console rows the flip reaches (be workload
+ * and games-services consoles; fe forum, owncast and tube admin consoles), so the
+ * set names them too. Nothing about the derivation changed.
+ *
+ * <p><b>WIDENED by decision 80b = B</b> (hugmesh-generator#329, operator answer
      * 2026-09-23): the cluster seed's flip also takes the PER-SERVICE admin-console
      * and superadmin-console shapes ({@code url_pattern LIKE '/bff/%/admin/%'} and
      * {@code LIKE '/bff/%/superadmin/%'}), so the forum, wiki and owncast console
      * rows need a fresh second factor once {@code APP_MFA_ENFORCE_PRIVILEGED_FLOOR}
      * is on. That generator edit is the DEFERRED gen-route lane's; this set carries
-     * the baked half. Of those per-service rows {@link #fe()} bakes only the two
-     * wiki ones (decision 80a = B) — it carries no forum or owncast row at all, so
-     * there is nothing else here to declare.
+     * the baked half. Of those per-service rows {@link #fe()} then baked only the
+     * two wiki ones (decision 80a = B); the forum, owncast and tube console rows
+     * came with the cluster-seed parity block (round-2 paragraph above).
      *
      * <pre>
      *   be():  /bff/superadmin/**                ROLE_SUPERADMIN
@@ -149,7 +159,17 @@ final class CanonicalSeed {
             "seed:" + FE + ":/bff/admin/**:ROLE_ADMIN",
             "seed:" + FE + ":/bff/superadmin/**:ROLE_SUPERADMIN",
             "seed:" + FE + ":/bff/wiki/admin/**:ROLE_ADMIN",
-            "seed:" + FE + ":/bff/wiki/superadmin/**:ROLE_SUPERADMIN");
+            "seed:" + FE + ":/bff/wiki/superadmin/**:ROLE_SUPERADMIN",
+            // hugmesh-gateway#61 round 2: the cluster-seed parity rows the same flip
+            // reaches (same derivation, no new rule; CanonicalSeedSqlSyncTest pins
+            // this set to EXACTLY the flip predicate applied to the baked allow rows).
+            "seed:" + BE + ":/bff/superadmin/games-services/**:ROLE_SUPERADMIN",
+            "seed:" + BE + ":/bff/superadmin/workloads/**:ROLE_SUPERADMIN",
+            "seed:" + BE + ":/bff/admin/workloads/**:ROLE_ADMIN",
+            "seed:" + FE + ":/bff/forum/admin/**:ROLE_ADMIN",
+            "seed:" + FE + ":/bff/owncast/admin/**:ROLE_ADMIN",
+            "seed:" + FE + ":/bff/tube/admin/access/**:ROLE_ADMIN",
+            "seed:" + FE + ":/bff/tube/admin/storage-budget/**:ROLE_ADMIN");
 
     private static Rule r(String gateway, String pattern, String role) {
         // domain=null => UNSCOPED (applies to any target brand). The baked-in seed
@@ -377,7 +397,59 @@ final class CanonicalSeed {
                 // resolving to their own rows. When the edge-ai slug is deselected
                 // gate_optional_services drops the Postgres row + the route; this
                 // floor stays closed-by-default either way.
-                r(BE, "/v1/**",                 "ROLE_USER"));
+                r(BE, "/v1/**",                 "ROLE_USER"),
+                // ── CLUSTER-SEED PARITY (hugmesh-gateway#61 round 2) ───────────────
+                // The rest of the be rows of the cluster Postgres seed, role for role,
+                // so the datastore-unreachable floor and the Cassandra-fallback union
+                // govern every surface the seed does. CanonicalSeedSqlSyncTest fails if
+                // a pki/be/fe row of the vendored seed is missing here (or if a row
+                // here is neither in the seed nor a named divergence).
+                // ·· admin superset pairings on the homeserver rows ··
+                r(BE, "/_matrix/**",               "ROLE_ADMIN"),
+                r(BE, "/.well-known/matrix/**",    "ROLE_ADMIN"),
+                r(BE, "/api/v1/**",                "ROLE_ADMIN"),
+                r(BE, "/api/v2/**",                "ROLE_ADMIN"),
+                r(BE, "/oauth/**",                 "ROLE_ADMIN"),
+                // ·· Synapse-compat surface (host-scoped) ··
+                r(BE, "/_synapse/**",              "ROLE_MATRIX"),
+                r(BE, "/_synapse/**",              "ROLE_MOD"),
+                r(BE, "/_synapse/**",              "ROLE_ADMIN"),
+                // ·· Mastodon media + streaming ··
+                r(BE, "/media/**",                 "ROLE_MASTODON"),
+                r(BE, "/media/**",                 "ROLE_MOD"),
+                r(BE, "/media/**",                 "ROLE_ADMIN"),
+                r(BE, "/api/v1/streaming/**",      "ROLE_MASTODON"),
+                r(BE, "/api/v1/streaming/**",      "ROLE_MOD"),
+                r(BE, "/api/v1/streaming/**",      "ROLE_ADMIN"),
+                // ·· Akkoma moderation REST / legacy admin / AdminFE assets ··
+                r(BE, "/api/v1/pleroma/admin/**",  "ROLE_MOD"),
+                r(BE, "/api/v1/pleroma/admin/**",  "ROLE_ADMIN"),
+                r(BE, "/api/pleroma/admin/**",     "ROLE_MOD"),
+                r(BE, "/api/pleroma/admin/**",     "ROLE_ADMIN"),
+                r(BE, "/pleroma/admin/**",         "ROLE_MOD"),
+                r(BE, "/pleroma/admin/**",         "ROLE_ADMIN"),
+                // ·· the cluster seed's exact-path external-client issuance rows (the
+                //    wildcard rows above are LONGER, so they still decide those paths) ··
+                r(BE, "/oauth/**",                    "ROLE_MASTODON_EXTERNAL_CLIENT"),
+                r(BE, "/_matrix/client/v3/login",     "ROLE_MATRIX_EXTERNAL_CLIENT"),
+                r(BE, "/_matrix/client/r0/login",     "ROLE_MATRIX_EXTERNAL_CLIENT"),
+                r(BE, "/_matrix/client/v3/register",  "ROLE_MATRIX_EXTERNAL_CLIENT"),
+                r(BE, "/_matrix/client/r0/register",  "ROLE_MATRIX_EXTERNAL_CLIENT"),
+                // ·· games-services (catalog, instances, per-instance consoles) ··
+                r(BE, "/bff/superadmin/games-services/**", "ROLE_SUPERADMIN"),
+                r(BE, "/bff/games-services/instances/**",  "ROLE_GAMES_SERVICES_ADMIN"),
+                r(BE, "/bff/games-services/instances/**",  "ROLE_GAMES_SERVICES_RUNNER"),
+                r(BE, "/bff/games-services/catalog/**",    "ROLE_GAMES_SERVICES"),
+                r(BE, "/games/servers/**",                 "ROLE_GAMES_SERVICES"),
+                r(BE, "/games/servers/**",                 "ROLE_ADMIN"),
+                r(BE, "/games/servers/**",                 "ROLE_MOD"),
+                // ·· workload console ··
+                r(BE, "/bff/superadmin/workloads/**", "ROLE_SUPERADMIN"),
+                r(BE, "/bff/admin/workloads/**",      "ROLE_ADMIN"),
+                // ·· federation registry, forum admin seam, tube content ··
+                r(BE, "/api/federation/**",   "ROLE_USER"),
+                r(BE, "/api/forum/admin/**",  "ROLE_ADMIN"),
+                r(BE, "/tube/content/**",     "ROLE_TUBE"));
     }
 
     private static List<Rule> fe() {
@@ -666,6 +738,65 @@ final class CanonicalSeed {
                 // server-side and never through its own filter chain).
                 deny(FE, "/bff/user/internal/**", "ROLE_USER"), // SERVICE-only ingest (meshdevice/moderation)
                 deny(FE, "/bff/mesh/internal/**", "ROLE_USER"), // SERVICE-only bridge-sync ingest
-                deny(FE, "/bff/internal/**",      "ROLE_USER")); // admin-bff internal API (permitAll app-side)
+                deny(FE, "/bff/internal/**",      "ROLE_USER"), // admin-bff internal API (permitAll app-side)
+                // ── CLUSTER-SEED PARITY (hugmesh-gateway#61 round 2) ───────────────
+                // The rest of the fe rows of the cluster Postgres seed, role for role
+                // (see the be() block of the same name and CanonicalSeedSqlSyncTest).
+                // NOT here, deliberately: the seed's ROLE_USER rows on /social/matrix/**
+                // and /social/mastodon/** (this floor keeps the platform-role gate
+                // above) and its /bff/superadmin/games-services/** DENY row (decision
+                // 41; see the /bff/superadmin/** comment).
+                // ·· homeserver surfaces the fe route table also fronts ··
+                r(FE, "/_matrix/**",               "ROLE_MATRIX"),
+                r(FE, "/_matrix/**",               "ROLE_MOD"),
+                r(FE, "/_matrix/**",               "ROLE_ADMIN"),
+                r(FE, "/.well-known/matrix/**",    "ROLE_MATRIX"),
+                r(FE, "/.well-known/matrix/**",    "ROLE_MOD"),
+                r(FE, "/.well-known/matrix/**",    "ROLE_ADMIN"),
+                r(FE, "/api/v1/**",                "ROLE_MASTODON"),
+                r(FE, "/api/v1/**",                "ROLE_MOD"),
+                r(FE, "/api/v1/**",                "ROLE_ADMIN"),
+                r(FE, "/api/v2/**",                "ROLE_MASTODON"),
+                r(FE, "/api/v2/**",                "ROLE_MOD"),
+                r(FE, "/api/v2/**",                "ROLE_ADMIN"),
+                r(FE, "/oauth/**",                 "ROLE_MASTODON"),
+                r(FE, "/oauth/**",                 "ROLE_MOD"),
+                r(FE, "/oauth/**",                 "ROLE_ADMIN"),
+                r(FE, "/oauth/**",                 "ROLE_MASTODON_EXTERNAL_CLIENT"),
+                r(FE, "/_matrix/client/v3/login",     "ROLE_MATRIX_EXTERNAL_CLIENT"),
+                r(FE, "/_matrix/client/r0/login",     "ROLE_MATRIX_EXTERNAL_CLIENT"),
+                r(FE, "/_matrix/client/v3/register",  "ROLE_MATRIX_EXTERNAL_CLIENT"),
+                r(FE, "/_matrix/client/r0/register",  "ROLE_MATRIX_EXTERNAL_CLIENT"),
+                r(FE, "/api/v1/apps",                 "ROLE_MASTODON_EXTERNAL_CLIENT"),
+                // ·· SPA shells and fragments ··
+                r(FE, "/api/federation/manifest", "ROLE_USER"),
+                r(FE, "/social/forum/**",         "ROLE_FORUM"),
+                r(FE, "/_fragments/**",           "ROLE_USER"),
+                r(FE, "/mod/**",                  "ROLE_MOD"),
+                r(FE, "/mod/**",                  "ROLE_ADMIN"),
+                r(FE, "/user/**",                 "ROLE_USER"),
+                r(FE, "/character-studio/**",     "ROLE_USER"),
+                r(FE, "/api-docs/**",             "ROLE_ADMIN"),
+                r(FE, "/admin/games-services/**", "ROLE_GAMES_SERVICES_ADMIN"),
+                r(FE, "/admin/games-services/**", "ROLE_GAMES_SERVICES_RUNNER"),
+                r(FE, "/wiki/**",                 "ROLE_WIKI"),
+                r(FE, "/owncast/**",              "ROLE_OWNCAST"),
+                r(FE, "/tube/**",                 "ROLE_TUBE"),
+                // ·· pre-auth password reset (anonymous, like /bff/login) ··
+                r(FE, "/bff/password-reset/request", "PUBLIC"),
+                r(FE, "/bff/password-reset/confirm", "PUBLIC"),
+                // ·· BFF tiers ··
+                r(FE, "/bff/mod/**",                       "ROLE_MOD"),
+                r(FE, "/bff/mod/**",                       "ROLE_ADMIN"),
+                r(FE, "/bff/user/**",                      "ROLE_USER"),
+                r(FE, "/bff/mesh/**",                      "ROLE_MESH"),
+                r(FE, "/bff/forum/admin/**",               "ROLE_ADMIN"),
+                r(FE, "/bff/forum/moderation/**",          "ROLE_FORUM_MOD"),
+                r(FE, "/bff/forum/**",                     "ROLE_FORUM"),
+                r(FE, "/bff/owncast/admin/**",             "ROLE_ADMIN"),
+                r(FE, "/bff/owncast/**",                   "ROLE_OWNCAST"),
+                r(FE, "/bff/tube/admin/access/**",         "ROLE_ADMIN"),
+                r(FE, "/bff/tube/admin/storage-budget/**", "ROLE_ADMIN"),
+                r(FE, "/bff/tube/**",                      "ROLE_TUBE"));
     }
 }
