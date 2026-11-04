@@ -523,42 +523,54 @@ explains why GitHub Actions alone will not catch regressions yet.
 ### Version and releases
 
 The version lives in one place: `<project><version>` in `pom.xml`, currently
-**`0.3.0-beta.1`**. It follows the org's beta scheme `MAJOR.MINOR.PATCH-beta.N`: `0.3`
-means the gateway has run live on the local mesh lanes with a recorded check, and N counts
-the betas published at that base. It is never a `-SNAPSHOT` and never has a `+build` part,
-because it becomes the image tag. `ReleaseWorkflowGuardTest` fails the build otherwise.
+**`0.3.0-beta.1`**. It is either a beta `MAJOR.MINOR.PATCH-beta.N` (cut from `main`) or a
+stable `MAJOR.MINOR.PATCH` (cut from its `release/MAJOR.MINOR` branch). It is never a
+`-SNAPSHOT` and never has a `+build` part, because it becomes the image tag.
+`ReleaseWorkflowGuardTest` fails the build otherwise.
 
 The [release workflow](.github/workflows/release.yml) publishes
-`ghcr.io/hugmesh/hugmesh-gateway`:
+`ghcr.io/hugmesh/hugmesh-gateway`. The tag decides the channel;
+[`scripts/release-channel.sh`](scripts/release-channel.sh) applies the rules and
+[`scripts/test-release-channel.sh`](scripts/test-release-channel.sh) tests them (the
+workflow runs the test first):
 
 | Trigger | Image tags | GitHub release |
 |---|---|---|
 | push to `main`, or a manual run on `main` | `:main`, `:sha-<12>` | none |
-| push of tag `v<version>`, or a manual run on that tag | `:<version>`, `:beta`, `:sha-<12>` | prerelease, never marked latest |
-| anything else | refused | none |
+| push to `release/X.Y`, or a manual run on it | `:sha-<12>` only | none |
+| tag `vX.Y.Z-beta.N` on a commit on `main` | `:X.Y.Z-beta.N`, `:beta`, `:sha-<12>` | prerelease, never Latest |
+| tag `vX.Y.Z` on a commit on `release/X.Y` | `:X.Y.Z`, `:X.Y`, `:latest`, `:sha-<12>` | marked Latest |
+| the same, on an older line (a newer stable is published) | `:X.Y.Z`, `:X.Y`, `:sha-<12>` | not marked Latest |
+| anything else (an `-rc.N` tag, `release/<not X.Y>`, another branch) | refused | none |
 
-- A `v*` tag must equal the pom version and point at a commit on `main`, or the run
-  stops before building.
-- A published `:<version>` is never overwritten. To publish a fix, raise N in `pom.xml`
-  (`0.3.0-beta.2`), merge, and tag again.
-- `:latest` is never pushed for a beta. Only a final version (no `-`) would move it.
+- A `v*` tag must equal `v` + the pom version, or the run stops before building. A
+  `release/X.Y` branch must carry an `X.Y.*` version.
+- A published `:X.Y.Z` (or `:X.Y.Z-beta.N`) is never overwritten. To publish a fix, raise N
+  (`0.3.0-beta.2`) on `main`, or the patch (`0.3.1`) on `release/0.3`, merge, and tag again.
+  `:beta`, `:X.Y` and `:latest` move.
+- Whether `:X.Y` and `:latest` move is decided again right before the push and right before
+  the GitHub release is created, so a re-run of an old patch never moves them backwards.
+  Every pushed tag is checked to resolve to the signed digest.
 - Before the build, the workflow checks that it can read `hugmesh-parent` and
   `hugmesh-commons` from GitHub Packages, and that the exact `hugmesh-commons` version
   pinned in `pom.xml` is published there. Publish order: build-config, parent, commons,
   auth-core, then this gateway, then the be/fe/pki-gateway overlays, which build FROM an
   exact gateway version.
-- Every job runs on the self-hosted runner named by the repository variable
-  `RUNS_ON_PUBLISH` (a JSON array of labels) only for `main` and `v*` tags, and on hosted
-  `ubuntu-latest` otherwise. Deleting that variable sends every job back to hosted runners.
+- The `version` and `github-release` jobs run on the self-hosted runner named by the
+  repository variable `RUNS_ON_PUBLISH` (a JSON array of labels) only for `main` and `v*`
+  tags, and on hosted `ubuntu-latest` otherwise (so `release/X.Y` runs are hosted). The
+  image job always runs hosted. Deleting that variable sends every job back to hosted runners.
 
-To cut a beta, on an up-to-date `main` whose pom says the version you mean:
+To cut a beta, on an up-to-date `main` whose pom says the version you mean (every pushed
+tag is signed):
 
 ```bash
-git tag -a v0.3.0-beta.1 -m "hugmesh-gateway 0.3.0-beta.1"
+git tag -s v0.3.0-beta.1 -m "hugmesh-gateway 0.3.0-beta.1"
 git push origin v0.3.0-beta.1
 ```
 
-The tag push starts the release run. To re-run it for the same tag:
+A stable `vX.Y.Z` is tagged the same way on `release/X.Y`, normally by the org release
+script. The tag push starts the release run. To re-run it for the same tag:
 `gh workflow run release.yml --repo hugmesh/hugmesh-gateway --ref v0.3.0-beta.1`.
 
 ### CI / security
@@ -566,7 +578,7 @@ The tag push starts the release run. To re-run it for the same tag:
 The main CI runs on an in-cluster **GitLab** instance that mirrors this GitHub repo
 (`.gitlab-ci.yml`). GitHub Actions has one workflow: the
 [release workflow](.github/workflows/release.yml), which builds the container image and
-publishes it to GHCR on a push to `main` or a `v*` tag (see *Version and releases*). It
+publishes it to GHCR on a push to `main` or `release/X.Y`, or a `v*` tag (see *Version and releases*). It
 has no pull-request trigger, so it does not test pull requests.
 
 The GitLab stages are `test → build → pentest`. A former `security` stage was dropped
