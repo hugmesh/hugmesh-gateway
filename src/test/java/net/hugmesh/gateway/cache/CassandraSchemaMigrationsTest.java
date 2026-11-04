@@ -143,11 +143,41 @@ class CassandraSchemaMigrationsTest {
         assertThat(migrations).containsKey("010-gateway-route-access-mfa-required-column");
         String cql = migrations.get("010-gateway-route-access-mfa-required-column");
         assertThat(cql).contains("ALTER TABLE gateway_route_access ADD IF NOT EXISTS mfa_required boolean");
-        // 010 is the LAST (newest) change-id — never inserted before a shipped one.
-        assertThat(migrations.keySet()).last().isEqualTo("010-gateway-route-access-mfa-required-column");
+        // 010 sits right after 009 — never inserted before a shipped one.
+        var ids = new java.util.ArrayList<>(migrations.keySet());
+        assertThat(ids.indexOf("010-gateway-route-access-mfa-required-column"))
+                .isEqualTo(ids.indexOf("009-revocations-domain-column") + 1);
         // The 005 CREATE TABLE entry is unchanged (no mfa_required smuggled in).
         assertThat(migrations.get("005-gateway-route-access-table"))
                 .doesNotContain("mfa_required");
+    }
+
+    /** hugmesh-gateway#61 round 2: the complete-or-ignored route-access cache is
+     *  two NEW tables appended as 011 + 012 (last, in that order). Rows of one
+     *  snapshot share a (gateway, generation) partition; the marker table holds
+     *  one row per gateway naming the current generation and what it must
+     *  contain. The 005 table entry is left untouched. */
+    @Test
+    void gatewayRouteAccessGenerationTables_areAppendedLast() throws Exception {
+        var field = CassandraSchemaMigrations.class.getDeclaredField("MIGRATIONS");
+        field.setAccessible(true);
+        @SuppressWarnings("unchecked")
+        java.util.LinkedHashMap<String, String> migrations =
+                (java.util.LinkedHashMap<String, String>) field.get(null);
+        var ids = new java.util.ArrayList<>(migrations.keySet());
+        assertThat(ids.subList(ids.size() - 2, ids.size())).containsExactly(
+                "011-gateway-route-access-generations-table",
+                "012-gateway-route-access-current-generation-table");
+        assertThat(migrations.get("011-gateway-route-access-generations-table"))
+                .contains("CREATE TABLE IF NOT EXISTS gateway_route_access_gen")
+                .contains("PRIMARY KEY ((gateway, generation), id)")
+                .contains("mfa_required boolean").contains("domain text");
+        assertThat(migrations.get("012-gateway-route-access-current-generation-table"))
+                .contains("CREATE TABLE IF NOT EXISTS gateway_route_access_current")
+                .contains("gateway text PRIMARY KEY")
+                .contains("generation text").contains("row_count int").contains("content_hash text");
+        assertThat(migrations.get("005-gateway-route-access-table"))
+                .doesNotContain("generation");
     }
 
     /** The account-states PREREQ table (P0) maps a HASHED homeserver bearer

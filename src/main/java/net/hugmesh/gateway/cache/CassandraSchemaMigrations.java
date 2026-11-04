@@ -227,6 +227,37 @@ public class CassandraSchemaMigrations {
         // ALTER run exactly once per environment.
         MIGRATIONS.put("010-gateway-route-access-mfa-required-column",
             "ALTER TABLE gateway_route_access ADD IF NOT EXISTS mfa_required boolean");
+
+        // Route-access read-cache, COMPLETE-OR-IGNORED (hugmesh-gateway#61 round 2).
+        // The 005 table was written row by row with no transaction and never
+        // pruned, so a mirror interrupted part-way left a PREFIX of the table that
+        // the Postgres-down fallback then enforced as if it were whole. The mirror
+        // now writes each snapshot into its own generation partition and flips the
+        // per-gateway marker below LAST; readers take only the marked generation,
+        // and only when its row count and content hash match the marker. The 005
+        // table is left in place (shipped entries are never edited or dropped)
+        // but is no longer read or written. See GatewayRouteAccessService.
+        MIGRATIONS.put("011-gateway-route-access-generations-table",
+            "CREATE TABLE IF NOT EXISTS gateway_route_access_gen (" +
+            "  gateway text," +
+            "  generation text," +
+            "  id text," +
+            "  url_pattern text," +
+            "  role text," +
+            "  casdoor_user text," +
+            "  \"allow\" boolean," +
+            "  domain text," +
+            "  mfa_required boolean," +
+            "  PRIMARY KEY ((gateway, generation), id)" +
+            ")");
+        MIGRATIONS.put("012-gateway-route-access-current-generation-table",
+            "CREATE TABLE IF NOT EXISTS gateway_route_access_current (" +
+            "  gateway text PRIMARY KEY," +
+            "  generation text," +
+            "  row_count int," +
+            "  content_hash text," +
+            "  written_at timestamp" +
+            ")");
     }
 
     private final ReactiveCqlOperations cql;

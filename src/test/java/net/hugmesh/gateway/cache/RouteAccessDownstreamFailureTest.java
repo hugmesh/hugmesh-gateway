@@ -4,9 +4,11 @@ import io.github.resilience4j.circuitbreaker.CallNotPermittedException;
 import io.github.resilience4j.circuitbreaker.CircuitBreaker;
 import io.github.resilience4j.circuitbreaker.CircuitBreakerConfig;
 import org.junit.jupiter.api.Test;
+import org.springframework.boot.health.contributor.Status;
 import org.springframework.cloud.client.circuitbreaker.ConfigBuilder;
 import org.springframework.cloud.client.circuitbreaker.ReactiveCircuitBreaker;
 import org.springframework.cloud.client.circuitbreaker.ReactiveCircuitBreakerFactory;
+import org.springframework.data.cassandra.core.ReactiveCassandraTemplate;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.mock.http.server.reactive.MockServerHttpRequest;
@@ -35,6 +37,8 @@ import net.hugmesh.gateway.security.DomainRegistry;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 /**
  * WAVE-2 DOWNSTREAM-FAILURE resilience — when the route-access control-plane datastore
@@ -52,8 +56,15 @@ import static org.assertj.core.api.Assertions.assertThatCode;
  * snapshot with the {@code CanonicalSeed} for this gateway tier (so the gate is NEVER
  * fail-open before the first datastore round-trip), THEN fires a refresh tick. With the
  * breaker OPEN (or the datastore erroring) that refresh fast-fails to the fallback
- * ({@code Mono.empty}), so {@code swap()} is never called and the CANONICAL SEED stands as
- * the enforced ruleset. For {@code hugmesh-be-gateway} the seed grants
+ * ({@code Mono.empty}), and when a read DOES complete it returns zero rows (a fresh
+ * Cassandra cache), which is refused as a load (hugmesh-gateway#61). Either way the
+ * CANONICAL SEED stands as the enforced ruleset.
+ *
+ * <p>The Cassandra template is a REAL mock that answers zero rows, never {@code null}: a
+ * {@code null} template skips the Cassandra fallback entirely, which is exactly how the
+ * #61 fail-open (an empty cache swapped in over the seed) went untested.
+ *
+ * <p>For {@code hugmesh-be-gateway} the seed grants
  * {@code /api/** -> ROLE_USER} (a user reaches a plain api path) but governs
  * {@code /api/admin/** -> ROLE_ADMIN} (a user is DENIED there). The assertions key on
  * those production-seed verdicts:
@@ -132,11 +143,11 @@ class RouteAccessDownstreamFailureTest {
     @Test
     void openBreaker_seedDeny_stillReturnsControlled403_notFailOpen_norStackTrace() {
         // The breaker is OPEN: init() seeds the canonical BE floor, then the refresh tick
-        // fast-fails to the fallback (Mono.empty) WITHOUT throwing, so swap() never runs
-        // and the seed stands. A ROLE_USER on the seed's ROLE_ADMIN-gated /api/admin/**
+        // fast-fails to the fallback (Mono.empty) WITHOUT throwing, so nothing is
+        // installed and the seed stands. A ROLE_USER on the seed's ROLE_ADMIN-gated /api/admin/**
         // is the last-good DENY.
         GatewayRouteAccessService svc = new GatewayRouteAccessService(
-                null, null, GATEWAY, true, false, openBreakerFactory());
+                emptyCassandra(), null, GATEWAY, true, false, openBreakerFactory());
         assertThatCode(svc::init)
                 .as("the OPEN-breaker refresh tick must not propagate out of init()")
                 .doesNotThrowAnyException();
@@ -159,7 +170,7 @@ class RouteAccessDownstreamFailureTest {
         // (/api/**) still forwards while the breaker is open — the gateway serves its
         // last-good ALLOW, never fail-CLOSED on everything either.
         GatewayRouteAccessService svc = new GatewayRouteAccessService(
-                null, null, GATEWAY, true, false, openBreakerFactory());
+                emptyCassandra(), null, GATEWAY, true, false, openBreakerFactory());
         svc.init();
 
         AtomicBoolean forwarded = new AtomicBoolean(false);
@@ -180,7 +191,7 @@ class RouteAccessDownstreamFailureTest {
         // The service's guarded(...)+onErrorResume must catch it, the refresh completes
         // empty, the seed is retained, and init() must not propagate the datastore error.
         GatewayRouteAccessService svc = new GatewayRouteAccessService(
-                null, null, GATEWAY, true, false, erroringBreakerFactory());
+                emptyCassandra(), null, GATEWAY, true, false, erroringBreakerFactory());
 
         assertThatCode(svc::init)
                 .as("a refresh whose datastore read errors must NOT propagate out of init()")
@@ -202,7 +213,7 @@ class RouteAccessDownstreamFailureTest {
         // refresh fast-failing, decide() is a pure walk over the in-memory seed snapshot —
         // a controlled verdict, never an exception (which would surface as a 500).
         GatewayRouteAccessService svc = new GatewayRouteAccessService(
-                null, null, GATEWAY, true, false, openBreakerFactory());
+                emptyCassandra(), null, GATEWAY, true, false, openBreakerFactory());
         svc.init();
 
         assertThatCode(() -> {
@@ -213,7 +224,46 @@ class RouteAccessDownstreamFailureTest {
         }).doesNotThrowAnyException();
     }
 
+    // ── #61: Postgres REJECTS the login, Cassandra is FRESH (zero rows) ─────────
+
+    @Test
+    void postgresRejected_freshCassandra_seedDenyStillReturns403_notForwarded() {
+        // The measured fail-open (issue #61 scenario S2): a CLOSED breaker lets both reads
+        // run; Postgres errors (wrong password), Cassandra answers zero rows. The empty
+        // result must not replace the seed: a ROLE_USER on the seed-governed admin path
+        // still gets the controlled 403, not a forward.
+        GatewayRouteAccessRepository rejected = mock(GatewayRouteAccessRepository.class);
+        when(rejected.findByGateway(GATEWAY)).thenReturn(
+                Flux.error(new RuntimeException("password authentication failed for user \"be_gateway\"")));
+        GatewayRouteAccessService svc = new GatewayRouteAccessService(
+                emptyCassandra(), rejected, GATEWAY, true, false,
+                RouteAccessEmptyLoadFloorTest.passThroughBreakerFactory());
+        svc.init();
+        svc.refreshNow().block();   // a later tick, same outcome
+
+        AtomicBoolean forwarded = new AtomicBoolean(false);
+        MockServerWebExchange mwex = driveFilter(svc, SEED_DENIED_FOR_USER, forwarded);
+        assertThat(forwarded).as("an empty cache must not turn the gate fail-open").isFalse();
+        assertThat(mwex.getResponse().getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
+        assertThat(mwex.getResponse().getHeaders().getFirst("X-Route-Denied"))
+                .isEqualTo(GATEWAY + ":" + SEED_DENIED_FOR_USER);
+
+        AtomicBoolean allowedForwarded = new AtomicBoolean(false);
+        driveFilter(svc, SEED_ALLOWED_FOR_USER, allowedForwarded);
+        assertThat(allowedForwarded).as("the seed ALLOW still forwards").isTrue();
+
+        assertThat(new RouteAccessHealthIndicator(svc).health().getStatus())
+                .as("running on the seed floor while Postgres fails is reported, not silent")
+                .isEqualTo(Status.DOWN);
+    }
+
     // ── test fixtures ───────────────────────────────────────────────────────────
+
+    /** A Cassandra cache with NO marked generation (a fresh cache), answering the
+     *  exact statements the service issues, and whose mirror writes succeed. */
+    private static ReactiveCassandraTemplate emptyCassandra() {
+        return new FakeRouteAccessCassandra().template();
+    }
 
     /** A {@link ReactiveCircuitBreakerFactory} whose breaker is genuinely OPEN: it
      *  ALWAYS routes the call to the fallback with a real {@link CallNotPermittedException}
