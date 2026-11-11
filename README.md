@@ -426,7 +426,7 @@ and is gated at class level on `hasRole('ADMIN')`:
 
 | Method | Path | Who | Purpose |
 |--------|------|-----|---------|
-| `POST` | `/api/gateway/revocations` | `ROLE_ADMIN`+ | revoke a key (with optional TTL); write-through into the Cassandra revocation list |
+| `POST` | `/api/gateway/revocations` | `ROLE_ADMIN`+ | revoke a key (with optional TTL); write-through into the Cassandra revocation list. A key already on the list keeps the later expiry, so a shorter TTL never shortens it |
 | `DELETE` | `/api/gateway/revocations/{key}` | `ROLE_ADMIN`+ | clear a revocation key |
 | `GET` | `/api/gateway/revocations` | `ROLE_SUPERADMIN` | snapshot of the current revocation list (observability) |
 

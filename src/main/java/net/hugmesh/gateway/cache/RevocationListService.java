@@ -13,10 +13,12 @@ import net.hugmesh.gateway.security.DomainRegistry;
 
 import jakarta.annotation.PostConstruct;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
@@ -81,6 +83,34 @@ import java.util.concurrent.ConcurrentMap;
 public class RevocationListService {
 
     private static final Logger log = LoggerFactory.getLogger(RevocationListService.class);
+
+    /** The {@code default_time_to_live} migration 002 gives the table; what a non-positive
+     *  {@code ttlSeconds} means. Written explicitly so every row carries {@code expires_at}. */
+    static final long TABLE_DEFAULT_TTL_SECONDS = 86_400L;
+
+    /** Upper bound on compare-and-set rounds for one {@link #revoke}; each lost round means
+     *  another writer changed the same key in between. */
+    static final int MAX_CAS_ATTEMPTS = 8;
+
+    /** The lightweight-transaction result column. */
+    static final String APPLIED = "[applied]";
+
+    /** Followed by the TTL in seconds. */
+    static final String INSERT_IF_ABSENT_TTL_PREFIX =
+            "INSERT INTO revocations (revocation_key, reason, revoked_at, expires_at, domain) "
+            + "VALUES (?, ?, ?, ?, ?) IF NOT EXISTS USING TTL ";
+
+    /** {@code %d} is the TTL in seconds. Sets every non-key column, so no cell is left on an
+     *  older, shorter TTL. */
+    static final String UPDATE_IF_EXPIRY_TEMPLATE =
+            "UPDATE revocations USING TTL %d SET reason = ?, revoked_at = ?, expires_at = ?, domain = ? "
+            + "WHERE revocation_key = ? IF expires_at = ?";
+
+    static final String SELECT_REMAINING_TTL =
+            "SELECT TTL(revoked_at) AS ttl_left FROM revocations WHERE revocation_key = ?";
+
+    static final String DELETE_IF_EXISTS =
+            "DELETE FROM revocations WHERE revocation_key = ? IF EXISTS";
 
     /** Reactive CQL — present when Cassandra is wired (spring-data-
      *  cassandra-reactive starter on the classpath + contact points
@@ -287,7 +317,11 @@ public class RevocationListService {
      * remaining token lifetime so the key outlives the token it gates (the
      * authoritative clock is the desired-state row in the writing service, e.g.
      * {@code access_suspension.expires_at}). A non-positive {@code ttlSeconds}
-     * inserts with the table default. No-op (logged) when Cassandra is not wired.
+     * means the table default ({@value #TABLE_DEFAULT_TTL_SECONDS} s). No-op
+     * (logged) when Cassandra is not wired.
+     *
+     * <p><b>A revocation can be extended, never shortened.</b> See
+     * {@link #revoke(String, String, long, String)}.
      *
      * <p>Back-compat overload — writes the row UNSCOPED (no owning domain). Prefer
      * {@link #revoke(String, String, long, String)} from the HTTP write surface so
@@ -306,6 +340,39 @@ public class RevocationListService {
      * non-SUPERADMIN admin may only touch keys owned by their OWN domain. A
      * {@code null}/blank/"default" {@code domain} stores the row UNSCOPED
      * (single-tenant + back-compat). No-op (logged) when Cassandra is not wired.
+     *
+     * <h4>Keep the later expiry</h4>
+     * Several writers share one key. admin-bff alone writes {@code subject:<user>} for
+     * an account-disable or a role revoke (a cut-off that must outlive the longest
+     * token, 168 h), for a role grant (1 h, only to force a re-mint) and for an active
+     * suspension (1 h, re-written every reconcile tick). The row used to be an
+     * unconditional {@code INSERT … USING TTL}, so the LAST write won: a role grant
+     * right after a role revoke (an ordinary demotion), or a suspension tick after an
+     * account-disable, cut a 168 h revocation down to 1 h, and the stale token was
+     * accepted again once that hour was up.
+     *
+     * <p>Now the row keeps the later of its current expiry and the requested one:
+     * <ol>
+     *   <li>{@code INSERT … IF NOT EXISTS}: a key that is not on the list is written
+     *       as before.</li>
+     *   <li>Otherwise the existing row comes back with the not-applied result. If its
+     *       expiry is at or after the requested one, nothing is written: the stronger
+     *       revocation stands, with its own reason and owner.</li>
+     *   <li>If the request reaches further, {@code UPDATE … IF expires_at = <value
+     *       read>} replaces it. A competing writer that changed the row in between
+     *       makes the condition fail, and the loop starts again from step 1 with what
+     *       is there now.</li>
+     * </ol>
+     * Both statements are lightweight transactions (Paxos), so the compare and the
+     * write are one step for every gateway pod; "keep the later expiry" is commutative,
+     * so any interleaving of writers ends at the latest expiry any of them asked for.
+     * The loop is bounded ({@value #MAX_CAS_ATTEMPTS} attempts); if it is exhausted the
+     * call fails, and it never falls back to an unconditional write, which is exactly
+     * the overwrite this replaces. A key is lifted early only by {@link #clear}.
+     *
+     * <p>{@code expires_at} is the compare-and-set token, so every write here stores
+     * it, a non-positive TTL included. A row an older gateway wrote without one (TTL
+     * left to the table default) is measured by its remaining cell TTL instead.
      */
     public Mono<Void> revoke(String key, String reason, long ttlSeconds, @Nullable String domain) {
         if (key == null || key.isBlank()) {
@@ -316,30 +383,99 @@ public class RevocationListService {
             return Mono.empty();
         }
         String owner = normalizeDomain(domain);
-        Instant now = Instant.now();
-        String cqlStmt = ttlSeconds > 0
-                ? "INSERT INTO revocations (revocation_key, reason, revoked_at, expires_at, domain) "
-                    + "VALUES (?, ?, ?, ?, ?) USING TTL " + ttlSeconds
-                : "INSERT INTO revocations (revocation_key, reason, revoked_at, expires_at, domain) "
-                    + "VALUES (?, ?, ?, ?, ?)";
-        Instant expiresAt = ttlSeconds > 0 ? now.plusSeconds(ttlSeconds) : null;
-        return Mono.from(cql.execute(cqlStmt, key, reason, now, expiresAt, owner))
-                .doOnSuccess(v -> {
-                    // Reflect the write locally so this pod enforces it without waiting for the
-                    // next poll; other pods converge on their tick. Synchronized so concurrent
-                    // revoke() calls cannot lose each other's entries via unsynchronized RMW.
+        long ttl = ttlSeconds > 0 ? ttlSeconds : TABLE_DEFAULT_TTL_SECONDS;
+        // Cassandra timestamps carry milliseconds; truncate so the value compared here is
+        // the value stored.
+        Instant now = Instant.now().truncatedTo(ChronoUnit.MILLIS);
+        Instant expiresAt = now.plusSeconds(ttl);
+        return writeKeepingLaterExpiry(key, reason, now, expiresAt, ttl, owner, 1)
+                .doOnNext(stored -> {
+                    // Reflect the row that is now in Cassandra locally so this pod enforces it
+                    // without waiting for the next poll; other pods converge on their tick.
+                    // Synchronized so concurrent revoke() calls cannot lose each other's
+                    // entries via unsynchronized RMW.
                     synchronized (this) {
                         Set<String> merged = new HashSet<>(revokedKeys);
                         merged.add(key);
                         revokedKeys = Collections.unmodifiableSet(merged);
                     }
-                    if (reason != null) reasons.put(key, reason);
-                    if (owner != null) keyDomains.put(key, owner);
+                    if (stored.reason() != null) reasons.put(key, stored.reason());
+                    else reasons.remove(key);
+                    if (stored.owner() != null) keyDomains.put(key, stored.owner());
                     else keyDomains.remove(key);
-                    log.info("[revocation] revoked key={} ttl={}s domain={} reason={}",
-                            key, ttlSeconds, owner, reason);
+                    if (stored.written()) {
+                        log.info("[revocation] revoked key={} ttl={}s domain={} reason={}",
+                                key, ttl, owner, reason);
+                    } else {
+                        log.info("[revocation] key={} already revoked until {} (requested {}); "
+                                + "kept the later expiry, reason={}", key, stored.expiresAt(),
+                                expiresAt, stored.reason());
+                    }
                 })
                 .then();
+    }
+
+    /** What {@link #writeKeepingLaterExpiry} left in the row: {@code written} is false when
+     *  an existing, later-expiring row was kept as it was. */
+    private record StoredRevocation(boolean written, @Nullable String reason,
+                                    @Nullable String owner, @Nullable Instant expiresAt) {}
+
+    private Mono<StoredRevocation> writeKeepingLaterExpiry(String key, String reason, Instant now,
+                                                           Instant expiresAt, long ttl,
+                                                           @Nullable String owner, int attempt) {
+        if (attempt > MAX_CAS_ATTEMPTS) {
+            return Mono.error(new IllegalStateException("revocation of " + key + " lost the "
+                    + "compare-and-set " + MAX_CAS_ATTEMPTS + " times to concurrent writers; "
+                    + "nothing was written"));
+        }
+        return cql.queryForRows(INSERT_IF_ABSENT_TTL_PREFIX + ttl, key, reason, now, expiresAt, owner)
+                .next()
+                .switchIfEmpty(Mono.error(new IllegalStateException(
+                        "no result row for the conditional insert of " + key)))
+                .flatMap(row -> {
+                    if (row.getBoolean(APPLIED)) {
+                        return Mono.just(new StoredRevocation(true, reason, owner, expiresAt));
+                    }
+                    // Not applied: the row is already there and came back with the result.
+                    Instant storedExpiry = row.getInstant("expires_at");   // null on a row an older gateway wrote
+                    String storedReason = row.getString("reason");
+                    String storedOwner = normalizeDomain(row.getString("domain"));
+                    return currentExpiryOf(key, storedExpiry).flatMap(current -> {
+                        if (current.isPresent() && !expiresAt.isAfter(current.get())) {
+                            return Mono.just(new StoredRevocation(false, storedReason, storedOwner,
+                                    current.get()));
+                        }
+                        if (current.isEmpty()) {
+                            // Gone between the conditional insert and the TTL read (expired or
+                            // cleared): start again, and the insert will now apply.
+                            return writeKeepingLaterExpiry(key, reason, now, expiresAt, ttl, owner,
+                                    attempt + 1);
+                        }
+                        return Mono.from(cql.execute(UPDATE_IF_EXPIRY_TEMPLATE.formatted(ttl),
+                                        reason, now, expiresAt, owner, key, storedExpiry))
+                                .flatMap(applied -> applied
+                                        ? Mono.just(new StoredRevocation(true, reason, owner, expiresAt))
+                                        : writeKeepingLaterExpiry(key, reason, now, expiresAt, ttl,
+                                                owner, attempt + 1));
+                    });
+                });
+    }
+
+    /**
+     * When the existing row stops revoking. Rows this class writes carry it in
+     * {@code expires_at}. A row an older gateway wrote with no TTL argument has a null
+     * {@code expires_at}; for those the remaining TTL of its {@code revoked_at} cell is
+     * read. A cell with no TTL never expires ({@link Instant#MAX}), so an unknown expiry
+     * can never count as shorter. Empty when the row has gone in the meantime.
+     */
+    private Mono<Optional<Instant>> currentExpiryOf(String key, @Nullable Instant storedExpiry) {
+        if (storedExpiry != null) return Mono.just(Optional.of(storedExpiry));
+        return cql.queryForRows(SELECT_REMAINING_TTL, key)
+                .next()
+                .map(row -> Optional.of(row.isNull("ttl_left")
+                        ? Instant.MAX
+                        : Instant.now().plusSeconds(row.getInt("ttl_left"))))
+                .defaultIfEmpty(Optional.empty());
     }
 
     /**
@@ -347,6 +483,11 @@ public class RevocationListService {
      * paths (suspension expiry, un-ban, re-grant of an external-client role). The
      * other pods drop the key on their next poll; this pod drops it immediately.
      * No-op (logged) when Cassandra is not wired.
+     *
+     * <p>The DELETE is conditional ({@code IF EXISTS}) so it is ordered by the same
+     * Paxos round as {@link #revoke}'s conditional writes. A plain DELETE carries the
+     * client clock as its timestamp, and a lightweight-transaction write can be stamped
+     * later than that, which would let a revoke that ran just before the clear survive it.
      *
      * <p><b>Authorization note.</b> This primitive does NOT itself enforce the
      * cross-tenant gate — the HTTP write surface ({@code GatewayRevocationController})
@@ -363,7 +504,7 @@ public class RevocationListService {
             log.warn("[revocation] clear({}) ignored — cassandra not wired", key);
             return Mono.empty();
         }
-        return Mono.from(cql.execute("DELETE FROM revocations WHERE revocation_key = ?", key))
+        return Mono.from(cql.execute(DELETE_IF_EXISTS, key))
                 .doOnSuccess(v -> {
                     synchronized (this) {
                         Set<String> merged = new HashSet<>(revokedKeys);
