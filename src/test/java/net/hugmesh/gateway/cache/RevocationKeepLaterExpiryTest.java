@@ -163,7 +163,7 @@ class RevocationKeepLaterExpiryTest {
         // Between this pod's read and its compare-and-set, another pod writes a cut-off.
         Instant later = Instant.now().plusSeconds(CUTOFF);
         AtomicInteger interleaved = new AtomicInteger();
-        db.beforeConditionalUpdate = key -> {
+        db.beforeUpdate = key -> {
             if (interleaved.getAndIncrement() == 0) {
                 db.rows.put(key, new StoredRow("account-disable", Instant.now(), later, null, (int) CUTOFF));
             }
@@ -185,7 +185,7 @@ class RevocationKeepLaterExpiryTest {
         // A competing writer moves the expiry on every round, always to just short of ours,
         // so each round still wants to write and each compare-and-set loses.
         AtomicInteger rounds = new AtomicInteger();
-        db.beforeConditionalUpdate = key -> {
+        db.beforeUpdate = key -> {
             rounds.incrementAndGet();
             StoredRow cur = db.rows.get(key);
             db.rows.put(key, new StoredRow("competitor", cur.revokedAt(),

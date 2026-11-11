@@ -37,7 +37,7 @@ import static org.mockito.Mockito.when;
  * the row, not merely by an unknown statement. Anything else fails the test.
  *
  * <p>Time does not pass here: a row's {@code ttl} is the TTL it was last written with.
- * {@link #beforeConditionalUpdate} runs just before each conditional UPDATE is evaluated,
+ * {@link #beforeUpdate} runs just before each UPDATE is evaluated,
  * standing in for another gateway pod that changes the same key between this pod's read
  * and its compare-and-set.
  */
@@ -49,8 +49,8 @@ final class FakeRevocationsCassandra {
     final Map<String, StoredRow> rows = Collections.synchronizedMap(new HashMap<>());
     /** Every statement in the order received. */
     final List<String> statements = Collections.synchronizedList(new ArrayList<>());
-    /** Called with the key just before a conditional UPDATE is evaluated; null = nothing. */
-    volatile Consumer<String> beforeConditionalUpdate;
+    /** Called with the key just before an UPDATE is evaluated; null = nothing. */
+    volatile Consumer<String> beforeUpdate;
     /** Called with the key just before the remaining-TTL read; null = nothing. */
     volatile Consumer<String> beforeTtlRead;
 
@@ -154,7 +154,9 @@ final class FakeRevocationsCassandra {
         if (upd.matches()) {
             String key = (String) a[4];
             boolean conditional = upd.group(2) != null;
-            if (conditional && beforeConditionalUpdate != null) beforeConditionalUpdate.accept(key);
+            // Another writer may get in between this pod's read and its write whatever shape
+            // the write has; only a conditional one notices.
+            if (beforeUpdate != null) beforeUpdate.accept(key);
             StoredRow incoming = new StoredRow((String) a[0], (Instant) a[1], (Instant) a[2], (String) a[3],
                     Integer.valueOf(upd.group(1)));
             synchronized (rows) {
