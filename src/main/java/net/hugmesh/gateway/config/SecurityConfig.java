@@ -530,7 +530,8 @@ public class SecurityConfig {
             // click rendered (GUI-08). /home is also the shell's DENIED_PATH, the
             // landing page for a signed-in user a route-access rule refuses. EXACT
             // paths: neither page has children. Mirrors the CanonicalSeed.fe()
-            // PUBLIC rows (the front-page-parity invariant).
+            // PUBLIC rows (the front-page-parity invariant; the cluster seed does
+            // not carry them yet, see CanonicalSeedSqlSyncTest.SEED_ONLY).
             "/home",
             "/about",
     };

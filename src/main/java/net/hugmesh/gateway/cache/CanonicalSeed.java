@@ -510,7 +510,10 @@ final class CanonicalSeed {
                 // mounts 'home' and 'about' with no guard; /home is also its
                 // DENIED_PATH). A hard load of either serves the same index.html '/'
                 // already serves anonymously. Mirrors SecurityConfig
-                // FE_SHELL_PUBLIC_GET_PATHS `/home` + `/about` (GUI-08).
+                // FE_SHELL_PUBLIC_GET_PATHS `/home` + `/about` (GUI-08). Baked only:
+                // the cluster seed cannot carry them until `home` and `about` are
+                // reserved prefixes (generator validate-reserved-prefixes.sh), see
+                // CanonicalSeedSqlSyncTest.SEED_ONLY.
                 r(FE, "/home",              "PUBLIC"),
                 r(FE, "/about",             "PUBLIC"),
                 r(FE, "/admin/**",          "ROLE_ADMIN"),
