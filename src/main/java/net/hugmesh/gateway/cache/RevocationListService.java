@@ -341,8 +341,7 @@ public class RevocationListService {
      * {@code null}/blank/"default" {@code domain} stores the row UNSCOPED
      * (single-tenant + back-compat). No-op (logged) when Cassandra is not wired.
      *
-     * <h4>Keep the later expiry</h4>
-     * Several writers share one key. admin-bff alone writes {@code subject:<user>} for
+     * <p><b>Keep the later expiry.</b> Several writers share one key. admin-bff alone writes {@code subject:<user>} for
      * an account-disable or a role revoke (a cut-off that must outlive the longest
      * token, 168 h), for a role grant (1 h, only to force a re-mint) and for an active
      * suspension (1 h, re-written every reconcile tick). The row used to be an

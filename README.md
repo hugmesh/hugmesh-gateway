@@ -439,6 +439,14 @@ the underlying `revoke`/`clear`. `ROLE_SUPERADMIN` is the only cross-brand bypas
 control plane). An unscoped or `default`-owned key stays writable in single-tenant
 setups (back-compat).
 
+**A key can be extended, never shortened.** Several writers share one key (admin-bff writes
+`subject:<user>` for a 168 h account-disable or role-revoke cut-off, a 1 h role grant, and
+a 1 h suspension tick every 30 s). `RevocationListService.revoke` keeps the later of the
+stored and the requested expiry, with a compare-and-set on `expires_at` (Cassandra
+lightweight transactions), so a later short write cannot cut a cut-off down. Only
+`DELETE` lifts a key early. `scripts/test-revocation-keep-later-expiry-live.sh` proves it
+against a throwaway Cassandra.
+
 ## Optional capabilities
 
 - **External-client (homeserver) issuance.** `CanonicalSeed`'s `be` rows gate the
