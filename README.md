@@ -205,10 +205,23 @@ The resource-server `SecurityWebFilterChain` applies the coarse, role-only floor
   are exact matches, not subtrees.
 - **FE tier only** (instance name ends in `-fe-gateway`), `GET` only, `permitAll`: the
   SPA shell (`/`, `/index.html`, `/favicon.ico`, `/importmap.json`,
-  `/remoteEntry.json`, `/*.js`, `/*.css`, `/assets/**`), `/login/**`,
-  `/api/federation/vanity`, `/api/federation/vanity/**` and
-  `/api/federation/capabilities`. On the pki and be tiers (and for an unknown instance
-  name) these stay on the authenticated floor.
+  `/remoteEntry.json`, `/*.js`, `/*.css`, `/assets/**`), `/login/**`, the shell's two
+  public pages `/home` and `/about` (exact paths), `/api/federation/vanity`,
+  `/api/federation/vanity/**` and `/api/federation/capabilities`. On the pki and be
+  tiers (and for an unknown instance name) these stay on the authenticated floor.
+- **FE tier only: hard-loaded pages.** A browser's top-level document navigation (a
+  `GET` whose `Accept` names `text/html`, with `Sec-Fetch-Mode` absent or `navigate` and
+  `Sec-Fetch-Dest` absent or `document`, and no `X-Requested-With: XMLHttpRequest`) is
+  not answered with a bodiless 401/403,
+  which the browser can only show as its own error page:
+  - not signed in: `302` to `/login?next=<path>`;
+  - signed in, refused by a route-access row: `302` to `/home?denied=<path>` (the host
+    shell's denied page), still carrying `X-Route-Denied`.
+
+  Every other request (API, `fetch`/XHR, `Accept: */*`, non-`GET`) and the pki/be
+  tiers keep the 401 with `WWW-Authenticate: Bearer` and the 403 with
+  `X-Route-Denied`. A step-up (MFA) denial, a cross-brand refusal and an unregistered
+  onion keep their 403. See `BrowserNavigation`.
 - **Opt-in** (`app.security.banned-remote-public`, env
   `APP_SECURITY_BANNED_REMOTE_PUBLIC`, shipped `false`): `/_remotes/banned/**`,
   the hugmesh-games `banned` remote. Only the literal `true` turns it on, and it

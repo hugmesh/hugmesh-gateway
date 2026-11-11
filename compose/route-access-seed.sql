@@ -211,6 +211,10 @@ INSERT INTO gateway_route_access (gateway, url_pattern, role, allow) VALUES
   -- layers open the same surface. The user-bff drives the Casdoor /api/login leg
   -- server-side and mints the opaque bff_ session (no token reaches the browser).
   ('hugmesh-fe-gateway',   '/login/**',             'PUBLIC',     true),
+  -- The host shell's public marketing pages (unguarded in host-shell
+  -- app.routes.ts; /home is also its DENIED_PATH). Same index.html as '/'.
+  ('hugmesh-fe-gateway',   '/home',                 'PUBLIC',     true),
+  ('hugmesh-fe-gateway',   '/about',                'PUBLIC',     true),
   ('hugmesh-fe-gateway',   '/admin/**',             'ROLE_ADMIN', true),
   ('hugmesh-fe-gateway',   '/bff/login',            'PUBLIC',     true),
   ('hugmesh-fe-gateway',   '/bff/register/**',      'ROLE_USER',  true),

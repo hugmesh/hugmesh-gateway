@@ -85,7 +85,12 @@ class FeShellPublicAccessSliceTest extends SecuritySliceSupport {
             // form. Both the /login route document and its hashed bundles under
             // /login/** must be anonymous GET on the fe front door.
             "/login",
-            "/login/main-ABCD1234.js");
+            "/login/main-ABCD1234.js",
+            // GUI-08: the host shell's public marketing pages (unguarded in host-shell
+            // app.routes.ts; /home is also its DENIED_PATH). A hard load of either is
+            // the same index.html '/' serves.
+            "/home",
+            "/about");
 
     // ── ANONYMOUS ALLOW — the fe front door serves the shell + public reads ───
 
@@ -231,6 +236,7 @@ class FeShellPublicAccessSliceTest extends SecuritySliceSupport {
                 "/bff/user/profile", "/bff/user/evil.js",
                 // NATIVE-LOGIN surfaces exercised by the login slice below.
                 "/login", "/login/main-ABCD1234.js", "/bff/login",
+                "/home", "/about",
         })
         Mono<String> ok() {
             return Mono.just("ok");

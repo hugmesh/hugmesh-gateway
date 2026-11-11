@@ -17,6 +17,7 @@ import org.springframework.web.server.WebFilterChain;
 import reactor.core.publisher.Mono;
 import net.hugmesh.gateway.cache.GatewayRouteAccessService;
 import net.hugmesh.gateway.cache.GatewayRouteAccessService.Decision;
+import net.hugmesh.gateway.security.BrowserNavigation;
 import net.hugmesh.gateway.security.CanonicalPath;
 import net.hugmesh.gateway.security.DomainRegistry;
 import net.hugmesh.gateway.security.Roles;
@@ -68,7 +69,12 @@ import java.util.Optional;
  *       MFA floor) the 403 also carries {@code X-Step-Up-Required: X-Mfa-StepUp}, so a
  *       console can offer the MFA challenge and retry; a role denial never carries it. The route-access grant
  *       is itself domain-scoped (per-row {@code domain} column) for the
- *       multi-brand architecture tier that legitimately serves several brands.</li>
+ *       multi-brand architecture tier that legitimately serves several brands.
+ *       On the fe tier a plain DENY of a top-level document navigation is a
+ *       {@code 302} to {@code /home?denied=<path>} instead (same
+ *       {@code X-Route-Denied}), so the browser lands on the shell's denied page rather
+ *       than its own "HTTP ERROR 403" (GUI-08, {@link BrowserNavigation}). API, script
+ *       and non-GET requests, and the pki/be tiers, keep the 403.</li>
  *   <li>{@link Decision#ALLOW} / {@link Decision#NO_RULE} → forward. NO_RULE
  *       means the path isn't governed by any rule at this gateway, so the
  *       coarse SecurityConfig gate (already passed) is the authority.</li>
@@ -497,6 +503,15 @@ public class GatewayRouteAccessFilter implements WebFilter, Ordered {
                     if (routeAccess.isMfaStepUpDenial(matchPath, targetDomain, userIds, authorities)) {
                         return rejectStepUp(exchange, path);
                     }
+                    // GUI-08: on the fe tier a refused top-level document navigation
+                    // lands on the shell's denied page instead of the browser's own
+                    // "HTTP ERROR 403". ONLY here — the plain route-access DENY. The
+                    // other rejects keep the bare 403: the domain hard-deny and the
+                    // unregistered onion refuse /home too (a redirect would loop), and
+                    // a step-up denial is not a missing role.
+                    if (redirectsDeniedNavigation(exchange, matchPath)) {
+                        return redirectDenied(exchange, path);
+                    }
                     return reject(exchange, path);
                 }
                 // NOTE (issue #4, TODO 2): the X-Domain producer is NOT here. Both
@@ -644,6 +659,35 @@ public class GatewayRouteAccessFilter implements WebFilter, Ordered {
     private Mono<Void> reject(ServerWebExchange exchange, String path) {
         log.warn("[route-access] denied — gateway={} path={}", routeAccess.gatewayName(), path);
         exchange.getResponse().setStatusCode(HttpStatus.FORBIDDEN);
+        exchange.getResponse().getHeaders().add("X-Route-Denied",
+                routeAccess.gatewayName() + ":" + path);
+        return exchange.getResponse().setComplete();
+    }
+
+    /** True iff this route-access DENY is answered with the denied-page redirect: the fe
+     *  tier, a top-level document navigation
+     *  ({@link BrowserNavigation#isDocumentNavigation}), and a refused path that is not
+     *  the denied page itself (loop guard). */
+    private boolean redirectsDeniedNavigation(ServerWebExchange exchange, String matchPath) {
+        return BrowserNavigation.isFeTier(routeAccess.gatewayName())
+                && BrowserNavigation.isDocumentNavigation(exchange.getRequest())
+                && !BrowserNavigation.isUnder(matchPath, BrowserNavigation.DENIED_PATH);
+    }
+
+    /** The {@link #reject} decision answered the way a browser can render: {@code 302}
+     *  to {@code /home?denied=<path>} — the host shell's DENIED_PATH, whose
+     *  {@code DeniedNoticeComponent} names the refused console — with the same
+     *  {@code X-Route-Denied} header {@link #reject} sets (so the denial stays
+     *  identifiable) and {@code Cache-Control: no-store} (so the redirect is never
+     *  replayed once the user holds the role). Only for a document navigation on the fe
+     *  tier; see {@link #redirectsDeniedNavigation}. */
+    private Mono<Void> redirectDenied(ServerWebExchange exchange, String path) {
+        log.warn("[route-access] denied — gateway={} path={} (document navigation -> {})",
+                routeAccess.gatewayName(), path, BrowserNavigation.DENIED_PATH);
+        exchange.getResponse().setStatusCode(HttpStatus.FOUND);
+        exchange.getResponse().getHeaders().setLocation(
+                BrowserNavigation.deniedRedirect(exchange.getRequest()));
+        exchange.getResponse().getHeaders().setCacheControl("no-store");
         exchange.getResponse().getHeaders().add("X-Route-Denied",
                 routeAccess.gatewayName() + ":" + path);
         return exchange.getResponse().setComplete();

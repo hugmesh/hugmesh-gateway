@@ -103,7 +103,14 @@ class CanonicalSeedSqlSyncTest {
             new Key(FE, "/social/matrix/**", "ROLE_MATRIX", true),
             new Key(FE, "/social/matrix/**", "ROLE_MOD", true),
             new Key(FE, "/social/mastodon/**", "ROLE_MASTODON", true),
-            new Key(FE, "/social/mastodon/**", "ROLE_MOD", true));
+            new Key(FE, "/social/mastodon/**", "ROLE_MOD", true),
+            // GUI-08: the host shell's public pages. The generator's cluster seed gains
+            // the same two rows in hugmesh-generator#994; this vendored copy predates it
+            // and is not refreshed here (generator main has also moved on unrelated
+            // rows). The next refresh makes namedDivergences_areStillReal fail on these
+            // two, which is the signal to drop them.
+            new Key(FE, "/home", "PUBLIC", true),
+            new Key(FE, "/about", "PUBLIC", true));
 
     /** The seed's row-scoped decision-28 UPDATE, whitespace-normalised. */
     static final String TARGETED_MFA_UPDATE =

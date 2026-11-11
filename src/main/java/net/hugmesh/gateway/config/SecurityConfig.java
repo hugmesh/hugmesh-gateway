@@ -22,11 +22,16 @@ import org.springframework.security.config.web.server.ServerHttpSecurity;
 import org.springframework.security.core.GrantedAuthority;
 import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.security.oauth2.server.resource.authentication.ReactiveJwtAuthenticationConverter;
+import org.springframework.security.oauth2.server.resource.web.server.BearerTokenServerAuthenticationEntryPoint;
+import org.springframework.security.web.server.DelegatingServerAuthenticationEntryPoint;
 import org.springframework.security.web.server.SecurityWebFilterChain;
+import org.springframework.security.web.server.ServerAuthenticationEntryPoint;
 import org.springframework.security.web.server.util.matcher.ServerWebExchangeMatcher;
 import org.springframework.util.AntPathMatcher;
 import org.springframework.web.server.ServerWebExchange;
 import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
+import net.hugmesh.gateway.security.BrowserNavigation;
 import net.hugmesh.gateway.security.DomainRegistry;
 
 import java.util.ArrayList;
@@ -363,7 +368,7 @@ public class SecurityConfig {
      *  and the route-access seed can never disagree about which instance is the
      *  front door. Blank/unknown names are NOT fe (fail-closed). */
     static boolean isFeTier(String applicationName) {
-        return applicationName != null && applicationName.endsWith("-fe-gateway");
+        return BrowserNavigation.isFeTier(applicationName);
     }
 
     /** Paths that anonymous traffic must reach (login, registration).
@@ -516,6 +521,18 @@ public class SecurityConfig {
             // PUBLIC row (CanonicalSeed.fe() `/login/** -> PUBLIC`) so the coarse
             // floor and the route-access layer open the SAME surface.
             "/login/**",
+            // The host shell's two PUBLIC MARKETING PAGES (host-shell app.routes.ts
+            // mounts 'home' and 'about' with no guard). A hard load of either is the
+            // SAME index.html document '/' already serves anonymously — the shell
+            // decides what to render — so opening them leaks nothing '/' does not.
+            // Without them a bookmark, a reload or a shared link to either page met
+            // the authenticated() floor while the same page reached by an in-app
+            // click rendered (GUI-08). /home is also the shell's DENIED_PATH, the
+            // landing page for a signed-in user a route-access rule refuses. EXACT
+            // paths: neither page has children. Mirrors the CanonicalSeed.fe()
+            // PUBLIC rows (the front-page-parity invariant).
+            "/home",
+            "/about",
     };
 
     /**
@@ -558,6 +575,15 @@ public class SecurityConfig {
 
     @Bean
     SecurityWebFilterChain filterChain(ServerHttpSecurity http) {
+        if (feTier) {
+            // FE front door ONLY: a top-level document navigation that needs a
+            // sign-in is sent to the login page instead of getting the bodiless 401
+            // the browser can only render as its own "HTTP ERROR 401" page (GUI-08).
+            // Every other request keeps the resource server's own Bearer 401. The
+            // pki/be tiers (and a blank or unknown name) never reach this branch,
+            // so their exception handling is untouched. See feEntryPoint().
+            http.exceptionHandling(e -> e.authenticationEntryPoint(feEntryPoint()));
+        }
         return http
                 .authorizeExchange(ex -> {
                     // PKI tier: the headscale control plane's Host needs
@@ -698,6 +724,50 @@ public class SecurityConfig {
                 // zero protection the BFF doesn't already provide.
                 .csrf(csrf -> csrf.disable())
                 .build();
+    }
+
+    /**
+     * The fe tier's authentication entry point — what an ANONYMOUS request that the
+     * {@code authorizeExchange} table refuses is answered with.
+     *
+     * <ul>
+     *   <li>A top-level document navigation
+     *       ({@link BrowserNavigation#isDocumentNavigation}: {@code GET}, {@code Accept}
+     *       naming {@code text/html}, {@code Sec-Fetch-Mode} absent or
+     *       {@code navigate}) gets {@code 302 Location: /login?next=<path>}, with
+     *       {@code Cache-Control: no-store} so the redirect is never replayed after the
+     *       visitor signs in. A navigation to {@code /login} itself is never redirected
+     *       (it is anonymous anyway; this is a loop guard).</li>
+     *   <li>Everything else — every API and script request, every non-GET, a
+     *       {@code *}{@code /*} Accept — gets {@link BearerTokenServerAuthenticationEntryPoint},
+     *       the entry point the resource server would have used: the same bodiless
+     *       {@code 401} with {@code WWW-Authenticate: Bearer}. It is set explicitly
+     *       because a {@link DelegatingServerAuthenticationEntryPoint} with no default
+     *       answers a plain 401 WITHOUT {@code WWW-Authenticate}.</li>
+     * </ul>
+     *
+     * <p>The redirect starts no session and sets no cookie (unlike
+     * {@code RedirectServerAuthenticationEntryPoint}, whose request cache saves the
+     * request in a {@code WebSession}).
+     */
+    static ServerAuthenticationEntryPoint feEntryPoint() {
+        ServerWebExchangeMatcher documentNavigation = exchange ->
+                BrowserNavigation.isDocumentNavigation(exchange.getRequest())
+                        && !BrowserNavigation.isUnder(exchange.getRequest().getPath().value(),
+                                BrowserNavigation.LOGIN_PATH)
+                        ? ServerWebExchangeMatcher.MatchResult.match()
+                        : ServerWebExchangeMatcher.MatchResult.notMatch();
+        ServerAuthenticationEntryPoint toLogin = (exchange, ex) -> Mono.defer(() -> {
+            var response = exchange.getResponse();
+            response.setStatusCode(org.springframework.http.HttpStatus.FOUND);
+            response.getHeaders().setLocation(BrowserNavigation.loginRedirect(exchange.getRequest()));
+            response.getHeaders().setCacheControl("no-store");
+            return response.setComplete();
+        });
+        DelegatingServerAuthenticationEntryPoint entryPoint = new DelegatingServerAuthenticationEntryPoint(
+                new DelegatingServerAuthenticationEntryPoint.DelegateEntry(documentNavigation, toLogin));
+        entryPoint.setDefaultEntryPoint(new BearerTokenServerAuthenticationEntryPoint());
+        return entryPoint;
     }
 
     /**

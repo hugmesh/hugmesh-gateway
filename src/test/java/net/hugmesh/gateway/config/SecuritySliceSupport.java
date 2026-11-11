@@ -102,7 +102,18 @@ abstract class SecuritySliceSupport {
             java.util.List<WebFilter> gatewayFilters,
             Object... controllers) {
 
-        SecurityConfig config = new SecurityConfig(registry, tenantResolver);
+        return sliceClientWithGatewayFilters(new SecurityConfig(registry, tenantResolver),
+                gatewayFilters, controllers);
+    }
+
+    /** {@link #sliceClientWithGatewayFilters(DomainRegistry, ObjectProvider, java.util.List,
+     *  Object...)} over an already-built {@link SecurityConfig}, so a full-chain slice can
+     *  run a NAMED tier (the fe front door's entry point and shell permits) instead of
+     *  the blank/unknown tier. */
+    static WebTestClient sliceClientWithGatewayFilters(
+            SecurityConfig config,
+            java.util.List<WebFilter> gatewayFilters,
+            Object... controllers) {
         SecurityWebFilterChain chain = config.filterChain(ServerHttpSecurity.http());
         WebFilterChainProxy securityFilter = new WebFilterChainProxy(chain);
 

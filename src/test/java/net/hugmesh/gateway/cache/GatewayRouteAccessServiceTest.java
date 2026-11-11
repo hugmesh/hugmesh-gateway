@@ -1002,7 +1002,9 @@ class GatewayRouteAccessServiceTest {
         s.primeForTest(seed);
         for (String path : List.of("/", "/index.html", "/favicon.ico",
                 "/importmap.json", "/remoteEntry.json",
-                "/main-PCXO4T2D.js", "/styles-76A67VRN.css", "/assets/logo.svg")) {
+                "/main-PCXO4T2D.js", "/styles-76A67VRN.css", "/assets/logo.svg",
+                // GUI-08: the shell's public marketing pages (exact paths)
+                "/home", "/about")) {
             assertThat(s.decide(path, "default", List.of(), List.of()))
                 .as("anonymous SPA shell path %s must be ALLOWed by the fe seed", path)
                 .isEqualTo(Decision.ALLOW);
@@ -1510,7 +1512,7 @@ class GatewayRouteAccessServiceTest {
                 "/remoteEntry.json", "/main.abc123.js", "/styles.abc123.css",
                 "/assets/logo.png", "/api/federation/vanity", "/api/federation/vanity/acme",
                 "/api/federation/capabilities", "/bff/public/announcements/login",
-                "/bff/public/appeal-contact")) {
+                "/bff/public/appeal-contact", "/home", "/about")) {
             assertThat(s.decide(path, "default", List.of(), List.of()))
                 .as("%s must resolve PUBLIC-allow (anonymous) in the dev seed", path)
                 .isEqualTo(Decision.ALLOW);

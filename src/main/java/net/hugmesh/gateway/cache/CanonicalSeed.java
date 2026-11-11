@@ -506,6 +506,13 @@ final class CanonicalSeed {
                 // the Casdoor /api/login leg SERVER-SIDE and mints the opaque bff_
                 // session; no token or Casdoor URL ever reaches the browser.
                 r(FE, "/login/**",          "PUBLIC"),
+                // The host shell's public marketing pages (host-shell app.routes.ts
+                // mounts 'home' and 'about' with no guard; /home is also its
+                // DENIED_PATH). A hard load of either serves the same index.html '/'
+                // already serves anonymously. Mirrors SecurityConfig
+                // FE_SHELL_PUBLIC_GET_PATHS `/home` + `/about` (GUI-08).
+                r(FE, "/home",              "PUBLIC"),
+                r(FE, "/about",             "PUBLIC"),
                 r(FE, "/admin/**",          "ROLE_ADMIN"),
                 r(FE, "/bff/login",         "PUBLIC"),
                 r(FE, "/bff/register/**",   "ROLE_USER"),
