@@ -22,11 +22,17 @@ import org.springframework.security.config.web.server.ServerHttpSecurity;
 import org.springframework.security.core.GrantedAuthority;
 import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.security.oauth2.server.resource.authentication.ReactiveJwtAuthenticationConverter;
+import org.springframework.security.oauth2.server.resource.web.server.BearerTokenServerAuthenticationEntryPoint;
+import org.springframework.security.web.server.DelegatingServerAuthenticationEntryPoint;
 import org.springframework.security.web.server.SecurityWebFilterChain;
+import org.springframework.security.web.server.ServerAuthenticationEntryPoint;
 import org.springframework.security.web.server.util.matcher.ServerWebExchangeMatcher;
+import org.springframework.security.web.server.util.matcher.ServerWebExchangeMatchers;
 import org.springframework.util.AntPathMatcher;
 import org.springframework.web.server.ServerWebExchange;
 import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
+import net.hugmesh.gateway.security.BrowserNavigation;
 import net.hugmesh.gateway.security.DomainRegistry;
 
 import java.util.ArrayList;
@@ -363,7 +369,7 @@ public class SecurityConfig {
      *  and the route-access seed can never disagree about which instance is the
      *  front door. Blank/unknown names are NOT fe (fail-closed). */
     static boolean isFeTier(String applicationName) {
-        return applicationName != null && applicationName.endsWith("-fe-gateway");
+        return BrowserNavigation.isFeTier(applicationName);
     }
 
     /** Paths that anonymous traffic must reach (login, registration).
@@ -519,6 +525,49 @@ public class SecurityConfig {
     };
 
     /**
+     * FE-TIER-ONLY anonymous PAGES: the host shell's two public pages (host-shell
+     * {@code app.routes.ts} mounts {@code home} and {@code about} with no guard),
+     * opened to a browser's <b>top-level document navigation and to nothing else</b>
+     * ({@link #feShellPageNavigation()}).
+     *
+     * <p><b>Why they are here at all (GUI-08).</b> Neither page has a menu entry
+     * (host-shell {@code about.component.ts}: "reachable only by typing the URL"), so
+     * an anonymous visitor reaches one by a hard load: a typed URL, a bookmark, a
+     * reload, a shared link. That request met the {@code authenticated()} floor and
+     * the browser showed its own "HTTP ERROR 401" page. The document served is the
+     * same {@code index.html} {@code /} already serves anonymously; the shell decides
+     * what to render.
+     *
+     * <p><b>Why they are NOT in {@link #FE_SHELL_PUBLIC_GET_PATHS}.</b> That list is
+     * anonymous for every {@code GET}, whatever the request looks like. Only a page
+     * load has any business at these two paths: nothing in the platform fetches
+     * {@code /home} or {@code /about} as data. So a script's {@code fetch()}, an XHR,
+     * curl, an API client ({@code Accept: *}{@code /*}, JSON or no {@code Accept}), a
+     * frame, and every non-{@code GET} keep the 401 with {@code WWW-Authenticate:
+     * Bearer} they have always had. The anonymous-visitor test plans probe
+     * {@code /home} in exactly those shapes and list it behind the wall (generator
+     * #290 N12, #297 N15: "any gated path answering 200 text/html to a jar-less
+     * request is a real finding"), and they stay true.
+     *
+     * <p><b>What the request-shape rule is not.</b> It is not a secret: the headers
+     * are the caller's to send, and the document is public either way. It keeps the
+     * anonymous surface as small as the defect needs, and keeps every existing
+     * anonymous probe meaning what it meant.
+     *
+     * <p><b>Exact paths, no route-access row.</b> A trailing slash, a child or a
+     * differently-cased name is not one of the two pages and stays gated (a page load
+     * of one is sent to sign in like any other gated route). And neither path has a
+     * {@code PUBLIC} row in {@code CanonicalSeed.fe()} or the cluster seed: a row has
+     * no request-shape column, so it would call the pages anonymous for every shape.
+     * A signed-in caller needs none: an ungoverned path forwards (the denied landing
+     * {@code /home?denied=<path>} relies on that).
+     */
+    private static final String[] FE_SHELL_PUBLIC_PAGES = {
+            "/home",
+            "/about",
+    };
+
+    /**
      * Homeserver-token passthrough surface (account-states PREREQ). Native
      * clients (Element / Tusky / Ivory) and our own social UIs hit these paths
      * with an opaque Matrix {@code access_token} / Mastodon OAuth token in the
@@ -558,6 +607,15 @@ public class SecurityConfig {
 
     @Bean
     SecurityWebFilterChain filterChain(ServerHttpSecurity http) {
+        if (feTier) {
+            // FE front door ONLY: a top-level document navigation that needs a
+            // sign-in is sent to the login page instead of getting the bodiless 401
+            // the browser can only render as its own "HTTP ERROR 401" page (GUI-08).
+            // Every other request keeps the resource server's own Bearer 401. The
+            // pki/be tiers (and a blank or unknown name) never reach this branch,
+            // so their exception handling is untouched. See feEntryPoint().
+            http.exceptionHandling(e -> e.authenticationEntryPoint(feEntryPoint()));
+        }
         return http
                 .authorizeExchange(ex -> {
                     // PKI tier: the headscale control plane's Host needs
@@ -576,6 +634,11 @@ public class SecurityConfig {
                     if (feTier) {
                         ex.pathMatchers(org.springframework.http.HttpMethod.GET,
                                 FE_SHELL_PUBLIC_GET_PATHS).permitAll();
+                        // ...and the shell's two public pages, for a top-level
+                        // document navigation ONLY. Any other request shape for
+                        // /home or /about falls through to authenticated() below
+                        // and keeps its Bearer 401. See FE_SHELL_PUBLIC_PAGES.
+                        ex.matchers(feShellPageNavigation()).permitAll();
                     }
                     // Homeserver-token traffic carries an opaque Matrix/Mastodon
                     // bearer, not a Casdoor JWT — permit it at the resource-server
@@ -698,6 +761,85 @@ public class SecurityConfig {
                 // zero protection the BFF doesn't already provide.
                 .csrf(csrf -> csrf.disable())
                 .build();
+    }
+
+    /**
+     * Matches an fe shell public page ({@link #FE_SHELL_PUBLIC_PAGES}) requested as a
+     * top-level document navigation: BOTH conditions, never either one alone.
+     *
+     * <ul>
+     *   <li><b>The path</b> is judged by Spring Security's own
+     *       {@code pathMatchers(GET, ...)}, the matcher every neighbouring permit uses
+     *       and the same view of the path the gateway routes on. Deliberately not
+     *       {@code CanonicalPath}: that view resolves dot segments and collapses
+     *       slashes, which is right for the route-access table (it can only narrow
+     *       what a signed-in caller reaches) and wrong for an anonymous PERMIT, where
+     *       the path permitted must be the path routed. Spring Security's firewall
+     *       refuses dot segments, path parameters and encoded slashes with a 400
+     *       before any matcher runs; {@code FeDocumentNavigationSliceTest} pins that
+     *       for these two pages.</li>
+     *   <li><b>The request shape</b> is {@link BrowserNavigation#isDocumentNavigation},
+     *       the one classifier the sign-in redirect ({@link #feEntryPoint()}) and the
+     *       denied-page redirect already use: {@code GET}, {@code Accept} naming
+     *       {@code text/html}, {@code Sec-Fetch-Mode} absent or {@code navigate},
+     *       {@code Sec-Fetch-Dest} absent or {@code document}, no
+     *       {@code X-Requested-With: XMLHttpRequest}.</li>
+     * </ul>
+     *
+     * Dropping the path condition would open EVERY route to an anonymous page load;
+     * dropping the shape condition would reopen the two pages to scripts and API
+     * clients. A request that fails either falls through to {@code authenticated()}.
+     */
+    static ServerWebExchangeMatcher feShellPageNavigation() {
+        ServerWebExchangeMatcher shellPage = ServerWebExchangeMatchers.pathMatchers(
+                org.springframework.http.HttpMethod.GET, FE_SHELL_PUBLIC_PAGES);
+        return exchange -> BrowserNavigation.isDocumentNavigation(exchange.getRequest())
+                ? shellPage.matches(exchange)
+                : ServerWebExchangeMatcher.MatchResult.notMatch();
+    }
+
+    /**
+     * The fe tier's authentication entry point — what an ANONYMOUS request that the
+     * {@code authorizeExchange} table refuses is answered with.
+     *
+     * <ul>
+     *   <li>A top-level document navigation
+     *       ({@link BrowserNavigation#isDocumentNavigation}: {@code GET}, {@code Accept}
+     *       naming {@code text/html}, {@code Sec-Fetch-Mode} absent or
+     *       {@code navigate}) gets {@code 302 Location: /login?next=<path>}, with
+     *       {@code Cache-Control: no-store} so the redirect is never replayed after the
+     *       visitor signs in. A navigation to {@code /login} itself is never redirected
+     *       (it is anonymous anyway; this is a loop guard).</li>
+     *   <li>Everything else — every API and script request, every non-GET, a
+     *       {@code *}{@code /*} Accept — gets {@link BearerTokenServerAuthenticationEntryPoint},
+     *       the entry point the resource server would have used: the same bodiless
+     *       {@code 401} with {@code WWW-Authenticate: Bearer}. It is set explicitly
+     *       because a {@link DelegatingServerAuthenticationEntryPoint} with no default
+     *       answers a plain 401 WITHOUT {@code WWW-Authenticate}.</li>
+     * </ul>
+     *
+     * <p>The redirect starts no session and sets no cookie (unlike
+     * {@code RedirectServerAuthenticationEntryPoint}, whose request cache saves the
+     * request in a {@code WebSession}).
+     */
+    static ServerAuthenticationEntryPoint feEntryPoint() {
+        ServerWebExchangeMatcher documentNavigation = exchange ->
+                BrowserNavigation.isDocumentNavigation(exchange.getRequest())
+                        && !BrowserNavigation.isUnder(exchange.getRequest().getPath().value(),
+                                BrowserNavigation.LOGIN_PATH)
+                        ? ServerWebExchangeMatcher.MatchResult.match()
+                        : ServerWebExchangeMatcher.MatchResult.notMatch();
+        ServerAuthenticationEntryPoint toLogin = (exchange, ex) -> Mono.defer(() -> {
+            var response = exchange.getResponse();
+            response.setStatusCode(org.springframework.http.HttpStatus.FOUND);
+            response.getHeaders().setLocation(BrowserNavigation.loginRedirect(exchange.getRequest()));
+            response.getHeaders().setCacheControl("no-store");
+            return response.setComplete();
+        });
+        DelegatingServerAuthenticationEntryPoint entryPoint = new DelegatingServerAuthenticationEntryPoint(
+                new DelegatingServerAuthenticationEntryPoint.DelegateEntry(documentNavigation, toLogin));
+        entryPoint.setDefaultEntryPoint(new BearerTokenServerAuthenticationEntryPoint());
+        return entryPoint;
     }
 
     /**

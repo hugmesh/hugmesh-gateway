@@ -1015,6 +1015,36 @@ class GatewayRouteAccessServiceTest {
     }
 
     @Test
+    void feSeeds_carryNoRowForTheShellPages_homeAndAbout() {
+        // GUI-08. SecurityConfig opens /home and /about to an anonymous TOP-LEVEL
+        // DOCUMENT NAVIGATION only; every other request shape keeps the 401. A
+        // route-access row has no request-shape column, so a PUBLIC row would call the
+        // two pages anonymous for EVERY shape: wider than the floor, and a claim the
+        // generator's route-access mirror would then hold an API client to. So both fe
+        // seeds leave the two paths UNGOVERNED: NO_RULE, which forwards a signed-in
+        // caller (the denied landing /home?denied=...) and is never consulted for an
+        // anonymous one.
+        var baked = new GatewayRouteAccessService(null, null, "hugmesh-fe-gateway", true, false, null);
+        baked.primeForTest(CanonicalSeed.forGateway("hugmesh-fe-gateway"));
+        var compose = new GatewayRouteAccessService(null, null, "hugmesh-fe-gateway", true, false, null);
+        compose.primeForTest(composeSeedRulesFor("hugmesh-fe-gateway"));
+        for (String path : List.of("/home", "/about")) {
+            assertThat(baked.decide(path, "default", List.of(), List.of()))
+                .as("CanonicalSeed.fe() must carry no row for %s (anonymous)", path)
+                .isEqualTo(Decision.NO_RULE);
+            assertThat(baked.decide(path, "default", List.of("u1"), List.of("ROLE_USER")))
+                .as("CanonicalSeed.fe() must carry no row for %s (signed in)", path)
+                .isEqualTo(Decision.NO_RULE);
+            assertThat(compose.decide(path, "default", List.of(), List.of()))
+                .as("compose/route-access-seed.sql must carry no row for %s (anonymous)", path)
+                .isEqualTo(Decision.NO_RULE);
+            assertThat(compose.decide(path, "default", List.of("u1"), List.of("ROLE_USER")))
+                .as("compose/route-access-seed.sql must carry no row for %s (signed in)", path)
+                .isEqualTo(Decision.NO_RULE);
+        }
+    }
+
+    @Test
     void canonicalSeed_feGateway_publicFederationReadsAreAnonymous() {
         // GET /api/federation/vanity(/**) (the PUBLIC profile resolve — the
         // cluster fe spec's vanity-subdomain route documents this allowance as

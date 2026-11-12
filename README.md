@@ -209,6 +209,26 @@ The resource-server `SecurityWebFilterChain` applies the coarse, role-only floor
   `/api/federation/vanity`, `/api/federation/vanity/**` and
   `/api/federation/capabilities`. On the pki and be tiers (and for an unknown instance
   name) these stay on the authenticated floor.
+- **FE tier only: hard-loaded pages.** A browser's top-level document navigation (a
+  `GET` whose `Accept` names `text/html`, with `Sec-Fetch-Mode` absent or `navigate` and
+  `Sec-Fetch-Dest` absent or `document`, and no `X-Requested-With: XMLHttpRequest`) is
+  not answered with a bodiless 401/403,
+  which the browser can only show as its own error page:
+  - `/home` or `/about` (exact paths), not signed in: served. They are the host shell's
+    two public pages, and a page load is the only request that gets them anonymously;
+  - any other gated route, not signed in: `302` to `/login?next=<path>`;
+  - signed in, refused by a route-access row: `302` to `/home?denied=<path>` (the host
+    shell's denied page), still carrying `X-Route-Denied`.
+
+  Every other request (API, `fetch`/XHR, `Accept: */*`, no `Accept`, a frame,
+  non-`GET`) and the pki/be tiers keep the 401 with `WWW-Authenticate: Bearer` and the
+  403 with `X-Route-Denied`, **including on `/home` and `/about`**: those two paths are
+  not in the public list above, have no route-access row, and answer an anonymous
+  script or API client exactly as they did before. The request shape is a way to keep
+  the anonymous surface small, not a secret: the headers are the caller's to send, and
+  the document served is the one `/` already serves. A step-up (MFA) denial, a
+  cross-brand refusal and an unregistered onion keep their 403. See `BrowserNavigation`
+  and `SecurityConfig.FE_SHELL_PUBLIC_PAGES`.
 - **Opt-in** (`app.security.banned-remote-public`, env
   `APP_SECURITY_BANNED_REMOTE_PUBLIC`, shipped `false`): `/_remotes/banned/**`,
   the hugmesh-games `banned` remote. Only the literal `true` turns it on, and it

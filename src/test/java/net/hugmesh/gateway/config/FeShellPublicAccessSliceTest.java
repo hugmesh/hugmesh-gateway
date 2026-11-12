@@ -130,6 +130,21 @@ class FeShellPublicAccessSliceTest extends SecuritySliceSupport {
     }
 
     @Test
+    void anonymous_stillDeniedOn_theShellPages_whenTheRequestIsNotAPageLoad_onFeGateway() {
+        // /home and /about are NOT in FE_SHELL_PUBLIC_GET_PATHS. They open to a
+        // top-level document navigation only (GUI-08, FeDocumentNavigationSliceTest has
+        // every request shape). The bare GET this class sends, with no Accept at all, is
+        // what an API client, curl or a script sends, and it keeps the 401 and its
+        // Bearer challenge on the very instance that serves '/' anonymously.
+        WebTestClient fe = clientFor("hugmesh-fe-gateway");
+        for (String path : List.of("/home", "/about")) {
+            fe.get().uri(path).exchange()
+                    .expectStatus().isUnauthorized()
+                    .expectHeader().valueEquals("WWW-Authenticate", "Bearer");
+        }
+    }
+
+    @Test
     void anonymous_stillDeniedOn_nestedJsOutsideWebroot_onFeGateway() {
         // Ant '*' does not cross '/': only ROOT-level bundles are public; a nested
         // .js path is NOT matched by /*.js and stays on the floor.
@@ -231,6 +246,7 @@ class FeShellPublicAccessSliceTest extends SecuritySliceSupport {
                 "/bff/user/profile", "/bff/user/evil.js",
                 // NATIVE-LOGIN surfaces exercised by the login slice below.
                 "/login", "/login/main-ABCD1234.js", "/bff/login",
+                "/home", "/about",
         })
         Mono<String> ok() {
             return Mono.just("ok");
