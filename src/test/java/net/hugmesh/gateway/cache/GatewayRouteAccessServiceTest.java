@@ -1002,9 +1002,7 @@ class GatewayRouteAccessServiceTest {
         s.primeForTest(seed);
         for (String path : List.of("/", "/index.html", "/favicon.ico",
                 "/importmap.json", "/remoteEntry.json",
-                "/main-PCXO4T2D.js", "/styles-76A67VRN.css", "/assets/logo.svg",
-                // GUI-08: the shell's public marketing pages (exact paths)
-                "/home", "/about")) {
+                "/main-PCXO4T2D.js", "/styles-76A67VRN.css", "/assets/logo.svg")) {
             assertThat(s.decide(path, "default", List.of(), List.of()))
                 .as("anonymous SPA shell path %s must be ALLOWed by the fe seed", path)
                 .isEqualTo(Decision.ALLOW);
@@ -1014,6 +1012,36 @@ class GatewayRouteAccessServiceTest {
         assertThat(s.decide("/admin/evil.js", "default", List.of("u1"), List.of("ROLE_USER")))
             .as("the /*.js shell row must not widen into gated prefixes")
             .isEqualTo(Decision.DENY);
+    }
+
+    @Test
+    void feSeeds_carryNoRowForTheShellPages_homeAndAbout() {
+        // GUI-08. SecurityConfig opens /home and /about to an anonymous TOP-LEVEL
+        // DOCUMENT NAVIGATION only; every other request shape keeps the 401. A
+        // route-access row has no request-shape column, so a PUBLIC row would call the
+        // two pages anonymous for EVERY shape: wider than the floor, and a claim the
+        // generator's route-access mirror would then hold an API client to. So both fe
+        // seeds leave the two paths UNGOVERNED: NO_RULE, which forwards a signed-in
+        // caller (the denied landing /home?denied=...) and is never consulted for an
+        // anonymous one.
+        var baked = new GatewayRouteAccessService(null, null, "hugmesh-fe-gateway", true, false, null);
+        baked.primeForTest(CanonicalSeed.forGateway("hugmesh-fe-gateway"));
+        var compose = new GatewayRouteAccessService(null, null, "hugmesh-fe-gateway", true, false, null);
+        compose.primeForTest(composeSeedRulesFor("hugmesh-fe-gateway"));
+        for (String path : List.of("/home", "/about")) {
+            assertThat(baked.decide(path, "default", List.of(), List.of()))
+                .as("CanonicalSeed.fe() must carry no row for %s (anonymous)", path)
+                .isEqualTo(Decision.NO_RULE);
+            assertThat(baked.decide(path, "default", List.of("u1"), List.of("ROLE_USER")))
+                .as("CanonicalSeed.fe() must carry no row for %s (signed in)", path)
+                .isEqualTo(Decision.NO_RULE);
+            assertThat(compose.decide(path, "default", List.of(), List.of()))
+                .as("compose/route-access-seed.sql must carry no row for %s (anonymous)", path)
+                .isEqualTo(Decision.NO_RULE);
+            assertThat(compose.decide(path, "default", List.of("u1"), List.of("ROLE_USER")))
+                .as("compose/route-access-seed.sql must carry no row for %s (signed in)", path)
+                .isEqualTo(Decision.NO_RULE);
+        }
     }
 
     @Test
@@ -1512,7 +1540,7 @@ class GatewayRouteAccessServiceTest {
                 "/remoteEntry.json", "/main.abc123.js", "/styles.abc123.css",
                 "/assets/logo.png", "/api/federation/vanity", "/api/federation/vanity/acme",
                 "/api/federation/capabilities", "/bff/public/announcements/login",
-                "/bff/public/appeal-contact", "/home", "/about")) {
+                "/bff/public/appeal-contact")) {
             assertThat(s.decide(path, "default", List.of(), List.of()))
                 .as("%s must resolve PUBLIC-allow (anonymous) in the dev seed", path)
                 .isEqualTo(Decision.ALLOW);

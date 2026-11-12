@@ -55,8 +55,12 @@ import static org.assertj.core.api.Assertions.assertThat;
  *       fe entry point) gives the same request: the 401 with
  *       {@code WWW-Authenticate: Bearer}, or the 403 with {@code X-Route-Denied}.</li>
  *   <li><b>The pki and be tiers</b> keep the 401/403 even for a document navigation.</li>
- *   <li><b>/home and /about</b> are anonymous on the fe tier (the shell's public pages)
- *       and nowhere else; a refusal of /home itself is never redirected to /home.</li>
+ *   <li><b>/home and /about</b>, the shell's two public pages, are served to an
+ *       anonymous <i>page load</i> on the fe tier and to nothing else. Every other
+ *       request shape for the same two paths ({@code *}{@code /*}, JSON, no Accept, a
+ *       script's fetch, XHR, a frame, non-GET) keeps the Bearer 401, header for header
+ *       what the blank tier answers; so do their siblings and children, and the pki/be
+ *       tiers. A refusal of /home itself is never redirected to /home.</li>
  * </ul>
  */
 class FeDocumentNavigationSliceTest extends SecuritySliceSupport {
@@ -127,16 +131,16 @@ class FeDocumentNavigationSliceTest extends SecuritySliceSupport {
     }
 
     /** The fe rows these routes are governed by in CanonicalSeed.fe() (the console
-     *  floors, the login and shell PUBLIC rows), primed under the given gateway name. */
+     *  floors and the login PUBLIC row), primed under the given gateway name. /home and
+     *  /about carry NO row here, exactly as in the real seed: a row has no request-shape
+     *  column, so the page-load permit is SecurityConfig's alone. */
     private static List<Rule> rowsFor(String gw, Rule... extra) {
         List<Rule> rows = new ArrayList<>(List.of(
                 new Rule("admin", gw, "/admin/**", "ROLE_ADMIN", null, true, null, false),
                 new Rule("mod", gw, "/mod/**", "ROLE_MOD", null, true, null, false),
                 new Rule("mod-admin", gw, "/mod/**", "ROLE_ADMIN", null, true, null, false),
                 new Rule("user", gw, "/user/**", "ROLE_USER", null, true, null, false),
-                new Rule("login", gw, "/login/**", "PUBLIC", null, true, null, false),
-                new Rule("home", gw, "/home", "PUBLIC", null, true, null, false),
-                new Rule("about", gw, "/about", "PUBLIC", null, true, null, false)));
+                new Rule("login", gw, "/login/**", "PUBLIC", null, true, null, false)));
         rows.addAll(List.of(extra));
         return rows;
     }
@@ -313,37 +317,207 @@ class FeDocumentNavigationSliceTest extends SecuritySliceSupport {
         return builder.build();
     }
 
-    // ── /home and /about: the shell's public pages ─────────────────────────────
+    // ── /home and /about: the shell's public pages, for a page load only ───────
 
-    @Test
-    void homeAndAbout_areAnonymous_onTheFeTier() {
-        WebTestClient fe = client(FE);
-        for (String path : List.of("/home", "/about", "/home?denied=%2Fadmin")) {
-            assertThat(navigate(fe, path, null).getStatus()).as(path).isEqualTo(HttpStatus.OK);
-            // and for a non-navigation GET too: it is a plain permitAll, not a redirect rule
-            assertThat(send(fe, HttpMethod.GET, path, Map.of(HttpHeaders.ACCEPT, "*/*"), null).getStatus())
-                    .as("%s with */*", path).isEqualTo(HttpStatus.OK);
-        }
-        assertThat(echo.hits.get()).isEqualTo(6);
+    /** The two pages, bare and with a query a real visitor arrives with. */
+    private static final List<String> SHELL_PAGES = List.of(
+            "/home", "/about", "/home?denied=%2Fadmin", "/about?ref=share");
+
+    /** The anonymous wall as generator #290 states it: 401, the Bearer challenge, no
+     *  body, and nothing that says a redirect or a route-access rule was involved. */
+    private static void assertWalled(EntityExchangeResult<byte[]> r, String what) {
+        assertThat(r.getStatus()).as(what).isEqualTo(HttpStatus.UNAUTHORIZED);
+        HttpHeaders h = r.getResponseHeaders();
+        assertThat(h.getFirst(HttpHeaders.WWW_AUTHENTICATE)).as("%s: the Bearer challenge", what)
+                .isEqualTo("Bearer");
+        assertThat(h.getFirst(HttpHeaders.LOCATION)).as("%s: no redirect", what).isNull();
+        assertThat(h.getFirst("X-Route-Denied"))
+                .as("%s: no route-access decision is made for an anonymous caller", what).isNull();
+        assertThat(r.getResponseBody()).as("%s: no body", what).isNullOrEmpty();
     }
 
     @Test
-    void homeAndAbout_stayOnTheAuthenticatedFloor_offTheFeTier() {
-        for (String tier : List.of(PKI, BE, BLANK)) {
+    void shellPages_areServedToAnAnonymousPageLoad_onTheFeTier() {
+        WebTestClient fe = client(FE);
+        for (String path : SHELL_PAGES) {
+            EntityExchangeResult<byte[]> r = navigate(fe, path, null);
+            assertThat(r.getStatus()).as(path).isEqualTo(HttpStatus.OK);
+            assertThat(new String(r.getResponseBody(), java.nio.charset.StandardCharsets.UTF_8))
+                    .as("%s reached the shell", path).isEqualTo("REACHED");
+            HttpHeaders h = r.getResponseHeaders();
+            assertThat(h.getFirst(HttpHeaders.LOCATION)).as(path).isNull();
+            assertThat(h.get(HttpHeaders.SET_COOKIE)).as("%s starts no session", path).isNull();
+            assertThat(h.getFirst(HttpHeaders.CACHE_CONTROL))
+                    .as("%s: the answer depends on the request shape, so nothing may store it "
+                            + "and replay it to a request of another shape", path)
+                    .contains("no-store");
+        }
+        assertThat(echo.hits.get()).isEqualTo(SHELL_PAGES.size());
+    }
+
+    @Test
+    void shellPages_areServedToAPageLoadThatSendsOnlyAcceptTextHtml() {
+        // No Sec-Fetch-* at all: a browser older than Fetch Metadata, or a text browser.
+        // Accept naming text/html is enough, exactly as for the sign-in redirect.
+        WebTestClient fe = client(FE);
+        for (String path : SHELL_PAGES) {
+            assertThat(send(fe, HttpMethod.GET, path, Map.of(HttpHeaders.ACCEPT, "text/html"), null)
+                    .getStatus()).as(path).isEqualTo(HttpStatus.OK);
+        }
+        assertThat(echo.hits.get()).isEqualTo(SHELL_PAGES.size());
+    }
+
+    @Test
+    void shellPages_everyOtherAnonymousRequestShape_keepsTheWall_headerForHeader() {
+        // THE CONTRACT. /home and /about are not "public paths": a script's fetch, an
+        // XHR, curl, an API client, a frame all get the very 401 they got before GUI-08.
+        // generator #290 (the anonymous wall) and #297 N15 probe /home in exactly these
+        // shapes, and a 200 there is, in #297's words, "a real finding".
+        WebTestClient fe = client(FE);
+        WebTestClient before = client(BLANK);
+        for (var shape : nonNavigationShapes().entrySet()) {
+            for (String path : SHELL_PAGES) {
+                String what = shape.getKey() + " -> " + path;
+                EntityExchangeResult<byte[]> now = send(fe, HttpMethod.GET, path, shape.getValue(), null);
+                EntityExchangeResult<byte[]> was = send(before, HttpMethod.GET, path, shape.getValue(), null);
+                assertWalled(now, what);
+                assertThat(comparable(now.getResponseHeaders()))
+                        .as("%s: header for header what the tier with no fe permit at all answers", what)
+                        .isEqualTo(comparable(was.getResponseHeaders()));
+            }
+        }
+        assertThat(echo.hits.get()).as("no walled request reached the shell").isZero();
+    }
+
+    @Test
+    void shellPages_nonGet_keepsTheWall_evenWithAPageLoadsHeaders() {
+        WebTestClient fe = client(FE);
+        WebTestClient before = client(BLANK);
+        for (HttpMethod method : List.of(HttpMethod.POST, HttpMethod.PUT, HttpMethod.DELETE,
+                HttpMethod.PATCH, HttpMethod.HEAD, HttpMethod.OPTIONS)) {
             for (String path : List.of("/home", "/about")) {
-                assertThat(navigate(client(tier), path, null).getStatus())
-                        .as("tier '%s' %s", tier, path).isEqualTo(HttpStatus.UNAUTHORIZED);
+                String what = method + " " + path;
+                EntityExchangeResult<byte[]> now = send(fe, method, path, CHROME_NAVIGATION, null);
+                EntityExchangeResult<byte[]> was = send(before, method, path, CHROME_NAVIGATION, null);
+                assertWalled(now, what);
+                assertThat(comparable(now.getResponseHeaders())).as(what)
+                        .isEqualTo(comparable(was.getResponseHeaders()));
             }
         }
         assertThat(echo.hits.get()).isZero();
     }
 
     @Test
-    void homeAndAbout_permitIsGetOnly() {
-        EntityExchangeResult<byte[]> r = send(client(FE), HttpMethod.POST, "/home",
-                Map.of(HttpHeaders.ACCEPT, "*/*"), null);
-        assertThat(r.getStatus()).isEqualTo(HttpStatus.UNAUTHORIZED);
+    void thePagePermit_isExactlyTheTwoPaths_siblingsAndChildrenStayWalled() {
+        // A trailing slash, a child, a longer or differently-cased name: none of them is
+        // one of the two pages. As a page load each is sent to sign in like any other
+        // gated route; in any other shape each keeps the 401. The trailing-slash rows
+        // are a decision, not an accident: the shell links to /home and /about only.
+        WebTestClient fe = client(FE);
+        for (String path : List.of("/home/", "/about/", "/home/x", "/about/team", "/homex",
+                "/abouts", "/Home", "/ABOUT", "/home.json", "/x/home", "/user/about")) {
+            assertRedirect(navigate(fe, path, null), "/login?next=" + path.replace("/", "%2F"));
+            assertWalled(send(fe, HttpMethod.GET, path, Map.of(HttpHeaders.ACCEPT, "*/*"), null),
+                    path + " with */*");
+        }
         assertThat(echo.hits.get()).isZero();
+    }
+
+    /** Sends {@code rawPath} byte for byte ({@code uri(String)} would re-encode a
+     *  {@code %}), so an encoded or non-normalised spelling reaches the chain as typed. */
+    private static EntityExchangeResult<byte[]> sendRaw(WebTestClient client, String rawPath,
+                                                        Map<String, String> headers) {
+        return client.method(HttpMethod.GET).uri(java.net.URI.create(rawPath))
+                .headers(h -> {
+                    h.set(HttpHeaders.HOST, HOST);
+                    headers.forEach(h::set);
+                })
+                .exchange()
+                .expectBody()
+                .returnResult();
+    }
+
+    @Test
+    void anOddSpellingOfAShellPage_neverWidensThePermit() {
+        WebTestClient fe = client(FE);
+        Map<String, String> apiClient = Map.of(HttpHeaders.ACCEPT, "*/*");
+
+        // (1) Dot segments, a path parameter, an encoded slash or backslash, a doubled
+        // slash, a NUL: Spring Security's firewall refuses the request with a 400 before
+        // any matcher runs, page load or not. So the permit can never be reached under a
+        // spelling that a router or an upstream could read as some other path.
+        for (String path : List.of("/x/../home", "/bff/../home", "/home/.", "/home//",
+                "/x/%2e%2e/home", "/home;x=1", "/home%2F", "/home%2f..%2fadmin", "/home%5C",
+                "/home%00")) {
+            assertThat(sendRaw(fe, path, CHROME_NAVIGATION).getStatus()).as("page load of %s", path)
+                    .isEqualTo(HttpStatus.BAD_REQUEST);
+            assertThat(sendRaw(fe, path, apiClient).getStatus()).as("*/* GET of %s", path)
+                    .isEqualTo(HttpStatus.BAD_REQUEST);
+        }
+        assertThat(echo.hits.get()).as("nothing refused by the firewall reached the shell").isZero();
+
+        // (2) A leading double slash, an encoded space, '?' or '#': simply not the page.
+        for (String path : List.of("//home", "/home%20", "/home%3Fx", "/home%23")) {
+            EntityExchangeResult<byte[]> nav = sendRaw(fe, path, CHROME_NAVIGATION);
+            assertThat(nav.getStatus()).as("page load of %s", path).isEqualTo(HttpStatus.FOUND);
+            assertThat(nav.getResponseHeaders().getFirst(HttpHeaders.LOCATION)).as("page load of %s", path)
+                    .startsWith("/login");
+            assertWalled(sendRaw(fe, path, apiClient), path + " with */*");
+        }
+        assertThat(echo.hits.get()).isZero();
+
+        // (3) A percent-encoded letter IS the page: the matcher and the router both read
+        // the decoded segment, so /%68ome is /home to both. The same rule applies to it:
+        // a page load is served, anything else keeps the 401.
+        List<String> encoded = List.of("/%68ome", "/hom%65", "/%61bout");
+        for (String path : encoded) {
+            assertThat(sendRaw(fe, path, CHROME_NAVIGATION).getStatus()).as("page load of %s", path)
+                    .isEqualTo(HttpStatus.OK);
+            assertWalled(sendRaw(fe, path, apiClient), path + " with */*");
+        }
+        assertThat(echo.hits.get()).isEqualTo(encoded.size());
+    }
+
+    @Test
+    void shellPages_stayOnTheAuthenticatedFloor_offTheFeTier() {
+        for (String tier : List.of(PKI, BE, BLANK, "brandx-be-gateway")) {
+            for (String path : List.of("/home", "/about")) {
+                assertWalled(navigate(client(tier), path, null), "tier '" + tier + "' " + path);
+            }
+        }
+        assertThat(echo.hits.get()).isZero();
+    }
+
+    @Test
+    void perBrandFeInstance_servesTheShellPages_toAPageLoadOnly() {
+        WebTestClient brand = client("brandx-fe-gateway");
+        for (String path : List.of("/home", "/about")) {
+            assertThat(navigate(brand, path, null).getStatus()).as(path).isEqualTo(HttpStatus.OK);
+            assertWalled(send(brand, HttpMethod.GET, path, Map.of(HttpHeaders.ACCEPT, "*/*"), null),
+                    "per-brand fe " + path + " with */*");
+        }
+        assertThat(echo.hits.get()).isEqualTo(2);
+    }
+
+    @Test
+    void signedIn_shellPages_areForwardedInEveryShape() {
+        // The split is about ANONYMOUS callers only. Signed in, /home and /about pass the
+        // authenticated floor in any shape, and no route-access row governs them (NO_RULE
+        // forwards), so the denied landing and anything the shell fetches keep working.
+        WebTestClient fe = client(FE);
+        String token = userToken();
+        int sent = 0;
+        for (String path : List.of("/home", "/about")) {
+            assertThat(navigate(fe, path, token).getStatus()).as("page load %s", path)
+                    .isEqualTo(HttpStatus.OK);
+            sent++;
+            for (var shape : nonNavigationShapes().entrySet()) {
+                assertThat(send(fe, HttpMethod.GET, path, shape.getValue(), token).getStatus())
+                        .as("%s -> %s", shape.getKey(), path).isEqualTo(HttpStatus.OK);
+                sent++;
+            }
+        }
+        assertThat(echo.hits.get()).isEqualTo(sent);
     }
 
     // ── signed in without the role: the denied-page redirect ──────────────────
@@ -396,9 +570,9 @@ class FeDocumentNavigationSliceTest extends SecuritySliceSupport {
 
     @Test
     void aRefusalOfTheDeniedPageItself_isNeverRedirectedBackToIt() {
-        // An operator row that refuses /home to plain users (an explicit deny, which wins
-        // over the PUBLIC row) must not turn every refusal into a redirect loop: the
-        // refusal of /home itself stays a 403.
+        // An operator row that refuses /home to plain users (an explicit deny) must not
+        // turn every refusal into a redirect loop: the refusal of /home itself stays a
+        // 403.
         WebTestClient fe = client(FE,
                 new Rule("home-deny-users", FE, "/home", "ROLE_USER", null, false, null, false));
         EntityExchangeResult<byte[]> r = navigate(fe, "/home", userToken());

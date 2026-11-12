@@ -46,6 +46,15 @@ import java.util.regex.Pattern;
  * </ul>
  * A request that fails any of these gets exactly the response it got before.
  *
+ * <p><b>The same rule also decides who sees the shell's two public pages.</b>
+ * {@code /home} and {@code /about} are served to an anonymous visitor only when the
+ * request is a document navigation ({@code SecurityConfig.feShellPageNavigation()}); in
+ * every other shape those two paths keep the 401, like any other gated path. So this
+ * one predicate is the whole difference between "a person opened a page" and "something
+ * asked for a URL" on the fe tier. It is a classification of the request, not a
+ * credential: the headers are the caller's to send. Nothing it lets through is private
+ * (two redirects to fixed pages, and the document {@code /} already serves to anyone).
+ *
  * <p><b>Nothing leaks.</b> Both targets are fixed, same-origin, relative paths. The only
  * request-derived part is the caller's own path and query, carried as one encoded query
  * value, and only when it has the shape login-ui accepts for a return path

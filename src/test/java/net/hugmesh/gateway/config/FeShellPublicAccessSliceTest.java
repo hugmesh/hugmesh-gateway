@@ -85,12 +85,7 @@ class FeShellPublicAccessSliceTest extends SecuritySliceSupport {
             // form. Both the /login route document and its hashed bundles under
             // /login/** must be anonymous GET on the fe front door.
             "/login",
-            "/login/main-ABCD1234.js",
-            // GUI-08: the host shell's public marketing pages (unguarded in host-shell
-            // app.routes.ts; /home is also its DENIED_PATH). A hard load of either is
-            // the same index.html '/' serves.
-            "/home",
-            "/about");
+            "/login/main-ABCD1234.js");
 
     // ── ANONYMOUS ALLOW — the fe front door serves the shell + public reads ───
 
@@ -132,6 +127,21 @@ class FeShellPublicAccessSliceTest extends SecuritySliceSupport {
         clientFor("hugmesh-fe-gateway")
                 .get().uri("/api/federation/manifest").exchange()
                 .expectStatus().isUnauthorized();
+    }
+
+    @Test
+    void anonymous_stillDeniedOn_theShellPages_whenTheRequestIsNotAPageLoad_onFeGateway() {
+        // /home and /about are NOT in FE_SHELL_PUBLIC_GET_PATHS. They open to a
+        // top-level document navigation only (GUI-08, FeDocumentNavigationSliceTest has
+        // every request shape). The bare GET this class sends, with no Accept at all, is
+        // what an API client, curl or a script sends, and it keeps the 401 and its
+        // Bearer challenge on the very instance that serves '/' anonymously.
+        WebTestClient fe = clientFor("hugmesh-fe-gateway");
+        for (String path : List.of("/home", "/about")) {
+            fe.get().uri(path).exchange()
+                    .expectStatus().isUnauthorized()
+                    .expectHeader().valueEquals("WWW-Authenticate", "Bearer");
+        }
     }
 
     @Test

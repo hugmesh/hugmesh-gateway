@@ -103,20 +103,7 @@ class CanonicalSeedSqlSyncTest {
             new Key(FE, "/social/matrix/**", "ROLE_MATRIX", true),
             new Key(FE, "/social/matrix/**", "ROLE_MOD", true),
             new Key(FE, "/social/mastodon/**", "ROLE_MASTODON", true),
-            new Key(FE, "/social/mastodon/**", "ROLE_MOD", true),
-            // GUI-08: the host shell's public pages, baked only. The cluster seed cannot
-            // carry them yet: every url_pattern there is a deployed route prefix, and
-            // generator scripts/validate-reserved-prefixes.sh requires each to be a
-            // reserved username label, which `home` and `about` are not (reserving them
-            // touches specs/cluster/reserved-prefixes.yaml and the three ReservedNames
-            // copies, and is an operator decision). The rows change no decision: the
-            // anonymous gate is SecurityConfig's FE_SHELL_PUBLIC_GET_PATHS, and a
-            // signed-in request with no row is NO_RULE, which forwards. If the labels
-            // are reserved and the cluster seed gains the rows,
-            // namedDivergences_areStillReal fails on these two, which is the signal to
-            // drop them here.
-            new Key(FE, "/home", "PUBLIC", true),
-            new Key(FE, "/about", "PUBLIC", true));
+            new Key(FE, "/social/mastodon/**", "ROLE_MOD", true));
 
     /** The seed's row-scoped decision-28 UPDATE, whitespace-normalised. */
     static final String TARGETED_MFA_UPDATE =
