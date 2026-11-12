@@ -2,6 +2,8 @@ package net.hugmesh.gateway.filter;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.Mockito;
 import org.springframework.http.HttpStatus;
 import org.springframework.mock.http.server.reactive.MockServerHttpRequest;
@@ -31,6 +33,7 @@ import static org.mockito.Mockito.when;
  *
  * <ul>
  *   <li>Admin token alone → forwards regardless of external auth state.</li>
+ *   <li>Superadmin alone (no ADMIN, no GAMES) → forwards.</li>
  *   <li>Game-master alone → forwards.</li>
  *   <li>Plain player with a user-specific grant → forwards.</li>
  *   <li>Plain player with an all-users grant → forwards.</li>
@@ -270,6 +273,85 @@ class ResourceAccessFilterTest {
 
         assertThat(downstreamCalled).isTrue();
         Mockito.verifyNoInteractions(authz);
+    }
+
+    // ── SUPERADMIN bypass (GUI-05, 2026-11-11) ────────────────────────────────
+    //    A pure superadmin (roles=[ROLE_SUPERADMIN], no ROLE_GAMES, no ADMIN) got
+    //    past GatewayRouteAccessFilter's superadmin bypass and was then 403'd here
+    //    on every game asset: the catalog icons fell back to letter tiles and the
+    //    WASM bundle index was refused with X-Resource-Denied: game:chess.
+
+    /** The exact live shape: the e2e-superadmin persona's JWT on the catalog icon,
+     *  the bundle index and the launch endpoint. Forwarded with ZERO grant
+     *  lookups, like admin. */
+    @ParameterizedTest
+    @ValueSource(strings = {
+        "/_remotes/wasm-fragment/chess/icon.svg",
+        "/_remotes/wasm-fragment/chess/index.html",
+        "/api/games/chess/launch",
+    })
+    void superadminRole_onGameTuple_bypassesWithZeroGrants(String path) {
+        Jwt superJwt = jwt("e2e-superadmin", List.of(Map.of("name", "ROLE_SUPERADMIN"), Map.of("name", "ROLE_USER")));
+        AbstractAuthenticationToken auth = authFor(superJwt, "SUPERADMIN");
+        MockServerWebExchange mwex = MockServerWebExchange.from(MockServerHttpRequest.get(path).build());
+        filter.filter(new ExchangeWithPrincipal(mwex, auth), forwarded).block();
+
+        assertThat(downstreamCalled).as("superadmin must reach %s", path).isTrue();
+        assertThat(mwex.getResponse().getStatusCode()).isNotEqualTo(HttpStatus.FORBIDDEN);
+        assertThat(mwex.getResponse().getHeaders().getFirst("X-Resource-Denied")).isNull();
+        Mockito.verifyNoInteractions(authz);
+    }
+
+    /** Every spelling Roles.isSuperadmin accepts (bare, hyphen, underscore) gets
+     *  the bypass, matching GatewayRouteAccessFilter. */
+    @ParameterizedTest
+    @ValueSource(strings = {"superadmin", "super-admin", "SUPER_ADMIN"})
+    void superadminRole_everySpelling_bypassesOnGameBundle(String roleName) {
+        Jwt superJwt = jwt("e2e-superadmin", List.of(Map.of("name", roleName)));
+        AbstractAuthenticationToken auth = authFor(superJwt, "SUPERADMIN");
+        MockServerWebExchange mwex = MockServerWebExchange.from(
+                MockServerHttpRequest.get("/_remotes/wasm-fragment/chess/index.html").build());
+        filter.filter(new ExchangeWithPrincipal(mwex, auth), forwarded).block();
+
+        assertThat(downstreamCalled).isTrue();
+        Mockito.verifyNoInteractions(authz);
+    }
+
+    /** Superadmin sits above admin, and the admin bypass is not scoped to the
+     *  "game" type, so a superadmin on a session tuple is forwarded too. This pins
+     *  the fix to the privileged bypass rather than the ROLE_GAMES floor, which
+     *  stops at game tuples. */
+    @Test
+    void superadminRole_onSessionTuple_bypassesWithZeroGrants() {
+        Jwt superJwt = jwt("e2e-superadmin", List.of(Map.of("name", "ROLE_SUPERADMIN")));
+        AbstractAuthenticationToken auth = authFor(superJwt, "SUPERADMIN");
+        MockServerWebExchange mwex = MockServerWebExchange.from(
+                MockServerHttpRequest.get("/api/sessions/abc/state").build());
+        filter.filter(new ExchangeWithPrincipal(mwex, auth), forwarded).block();
+
+        assertThat(downstreamCalled).isTrue();
+        assertThat(mwex.getResponse().getHeaders().getFirst("X-Resource-Denied")).isNull();
+        Mockito.verifyNoInteractions(authz);
+    }
+
+    /** The bypass reads the validated token's roles claim, not the authority list:
+     *  a JWT whose roles claim lacks superadmin stays grant-gated even if a
+     *  ROLE_SUPERADMIN authority were somehow present. */
+    @Test
+    void superadminAuthorityWithoutRolesClaim_isStillGrantGated() {
+        when(authz.isGranted(anyString(), anyString(), anyString())).thenReturn(false);
+        when(authz.hasAnyRoleGrant(anyString(), anyString(), any())).thenReturn(false);
+
+        Jwt userJwt = jwt("e2e-user", List.of(Map.of("name", "ROLE_USER")));
+        AbstractAuthenticationToken auth = authFor(userJwt, "SUPERADMIN");
+        MockServerWebExchange mwex = MockServerWebExchange.from(
+                MockServerHttpRequest.get("/_remotes/wasm-fragment/chess/index.html").build());
+        filter.filter(new ExchangeWithPrincipal(mwex, auth), forwarded).block();
+
+        assertThat(downstreamCalled).isFalse();
+        assertThat(mwex.getResponse().getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
+        assertThat(mwex.getResponse().getHeaders().getFirst("X-Resource-Denied"))
+            .isEqualTo("game:chess");
     }
 
     @Test

@@ -39,8 +39,8 @@ import java.util.regex.Pattern;
  * <p>Auth chain (short-circuits on first match):
  *
  * <ol>
- *   <li>{@code ROLE_ADMIN} OR {@code ROLE_GAME-MASTER} on the
- *       internal JWT — forwards unconditionally. This is the
+ *   <li>{@code ROLE_SUPERADMIN}, {@code ROLE_ADMIN} OR {@code ROLE_GAME-MASTER}
+ *       on the internal JWT — forwards unconditionally. This is the
  *       "admin's authorization still works without an external
  *       provider" contract: an admin token issued by Casdoor sails
  *       through every resource check regardless of whether an
@@ -130,11 +130,18 @@ public class ResourceAccessFilter implements WebFilter, Ordered {
                     return chain.filter(exchange);
                 }
                 AbstractAuthenticationToken auth = maybeAuth.get();
-                // Admin / game-master bypass. The internal Casdoor JWT
-                // alone is sufficient — no external-OAuth header
+                // Superadmin / admin / game-master bypass. The internal Casdoor
+                // JWT alone is sufficient — no external-OAuth header
                 // required. This is the explicit contract for "admin
                 // authorization works without an external provider".
-                if (auth.getPrincipal() instanceof Jwt jwt && (Roles.isAdmin(jwt) || Roles.isGameMaster(jwt))) {
+                // SUPERADMIN is in the set because it is the infra super-role
+                // above ADMIN: GatewayRouteAccessFilter already lets it through
+                // every surface, so leaving it out here meant a pure superadmin
+                // (roles=[ROLE_SUPERADMIN], no ROLE_GAMES) passed the route gate
+                // and was then 403'd on every game asset (catalog icons fell back
+                // to letter tiles; the WASM bundle index was refused).
+                if (auth.getPrincipal() instanceof Jwt jwt
+                        && (Roles.isSuperadmin(jwt) || Roles.isAdmin(jwt) || Roles.isGameMaster(jwt))) {
                     return chain.filter(exchange);
                 }
                 // ROLE_GAMES floor for the "game" resource type ONLY. ROLE_GAMES is the
