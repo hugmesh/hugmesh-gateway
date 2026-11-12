@@ -33,11 +33,15 @@ import java.util.Set;
  *
  * <p><b>Endpoint contract</b>
  * <ul>
- *   <li>{@code POST /api/gateway/revocations} — write (or refresh) a revocation key.
+ *   <li>{@code POST /api/gateway/revocations} — write (or extend) a revocation key.
  *       Body: {@code {"key": "...", "reason": "...", "ttlSeconds": 86400}}. Returns
  *       204 on success. {@code ttlSeconds} is optional (defaults to 0, meaning the
  *       table-level TTL applies); a non-positive value falls back to the table default.
- *       {@code reason} is optional — omitted or null is stored as-is in Cassandra.</li>
+ *       {@code reason} is optional — omitted or null is stored as-is in Cassandra.
+ *       A key that is already on the list keeps the LATER of its current expiry and
+ *       the requested one, so a short write never shortens a longer revocation (see
+ *       {@link RevocationListService#revoke(String, String, long, String)}); only the
+ *       DELETE below lifts a key early.</li>
  *   <li>{@code DELETE /api/gateway/revocations/{key}} — lift a key off the list (the
  *       restore path: un-ban, suspension expiry, re-grant of an external-client role).
  *       Returns 204. The gateway enforces the key's absence immediately on this pod;
@@ -139,9 +143,11 @@ public class GatewayRevocationController {
     }
 
     /**
-     * Write (or refresh) a revocation key. Persists the key to Cassandra and immediately
+     * Write (or extend) a revocation key. Persists the key to Cassandra and immediately
      * reflects it in the local cache on this pod; other pods converge within one poll tick
-     * (≈ the {@code app.revocation.refresh-interval-ms} value, default 5 s).
+     * (≈ the {@code app.revocation.refresh-interval-ms} value, default 5 s). A key already
+     * on the list keeps the later of its current and the requested expiry: a request that
+     * would end it sooner leaves the existing row (reason, owner, TTL) as it is.
      *
      * <p>Scoped to the caller's validated-issuer brand: the row is stamped with the
      * caller's domain, and a non-SUPERADMIN caller is rejected (403) if the key is
@@ -222,7 +228,8 @@ public class GatewayRevocationController {
      * @param ttlSeconds TTL in seconds for the Cassandra row; non-positive or omitted
      *                   values fall back to the table-level default (86400 s). Should
      *                   be {@code >=} the remaining token lifetime so the key outlives
-     *                   the credential it gates.
+     *                   the credential it gates. It can only extend an existing key,
+     *                   never shorten it.
      */
     public record RevocationRequest(String key, String reason, Long ttlSeconds) {}
 }

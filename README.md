@@ -426,7 +426,7 @@ and is gated at class level on `hasRole('ADMIN')`:
 
 | Method | Path | Who | Purpose |
 |--------|------|-----|---------|
-| `POST` | `/api/gateway/revocations` | `ROLE_ADMIN`+ | revoke a key (with optional TTL); write-through into the Cassandra revocation list |
+| `POST` | `/api/gateway/revocations` | `ROLE_ADMIN`+ | revoke a key (with optional TTL); write-through into the Cassandra revocation list. A key already on the list keeps the later expiry, so a shorter TTL never shortens it |
 | `DELETE` | `/api/gateway/revocations/{key}` | `ROLE_ADMIN`+ | clear a revocation key |
 | `GET` | `/api/gateway/revocations` | `ROLE_SUPERADMIN` | snapshot of the current revocation list (observability) |
 
@@ -438,6 +438,14 @@ caller whose domain cannot be proven (null), or a cross-tenant attempt, never re
 the underlying `revoke`/`clear`. `ROLE_SUPERADMIN` is the only cross-brand bypass (infra
 control plane). An unscoped or `default`-owned key stays writable in single-tenant
 setups (back-compat).
+
+**A key can be extended, never shortened.** Several writers share one key (admin-bff writes
+`subject:<user>` for a 168 h account-disable or role-revoke cut-off, a 1 h role grant, and
+a 1 h suspension tick every 30 s). `RevocationListService.revoke` keeps the later of the
+stored and the requested expiry, with a compare-and-set on `expires_at` (Cassandra
+lightweight transactions), so a later short write cannot cut a cut-off down. Only
+`DELETE` lifts a key early. `scripts/test-revocation-keep-later-expiry-live.sh` proves it
+against a throwaway Cassandra.
 
 ## Optional capabilities
 
